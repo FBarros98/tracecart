@@ -1,0 +1,3 @@
+# Keep LF endings so files mounted/copied into Linux containers (e.g. the psql init script)
+# behave the same on Windows checkouts.
+* text=auto eol=lf

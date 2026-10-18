@@ -1,0 +1,108 @@
+name: tracecart
+
+x-service-healthcheck: &service-healthcheck
+  test:
+    - CMD
+    - python
+    - -c
+    - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+services:
+  tracecart-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (cp .env.example .env)}
+      POSTGRES_DB: postgres
+      ORDER_DB_USER: ${ORDER_DB_USER:-tracecart_order}
+      ORDER_DB_PASSWORD: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in .env}
+      PAYMENT_DB_USER: ${PAYMENT_DB_USER:-tracecart_payment}
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?Set PAYMENT_DB_PASSWORD in .env}
+    volumes:
+      - tracecart-postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    # No published ports: PostgreSQL is reachable only inside the Compose network.
+    networks:
+      - tracecart-network
+    healthcheck:
+      # TCP check: during first-time initialization the server only listens on the Unix socket,
+      # so this succeeds only after the init scripts have created both databases.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d tracecart_payments"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  tracecart-payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    image: tracecart-payment-service:local
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DB_HOST: tracecart-postgres
+      DB_PORT: 5432
+      DB_NAME: tracecart_payments
+      DB_USER: ${PAYMENT_DB_USER:-tracecart_payment}
+      DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?Set PAYMENT_DB_PASSWORD in .env}
+      PAYMENT_DECLINE_ENABLED: ${PAYMENT_DECLINE_ENABLED:-false}
+      PAYMENT_DECLINE_RATE: ${PAYMENT_DECLINE_RATE:-0.0}
+      PAYMENT_LATENCY_ENABLED: ${PAYMENT_LATENCY_ENABLED:-false}
+      PAYMENT_LATENCY_MIN_MS: ${PAYMENT_LATENCY_MIN_MS:-0}
+      PAYMENT_LATENCY_MAX_MS: ${PAYMENT_LATENCY_MAX_MS:-0}
+      DATABASE_FAILURE_ENABLED: ${DATABASE_FAILURE_ENABLED:-false}
+      DATABASE_FAILURE_RATE: ${DATABASE_FAILURE_RATE:-0.0}
+      UNEXPECTED_ERROR_ENABLED: ${UNEXPECTED_ERROR_ENABLED:-false}
+      UNEXPECTED_ERROR_RATE: ${UNEXPECTED_ERROR_RATE:-0.0}
+    ports:
+      - "${PAYMENT_SERVICE_PORT:-8001}:8000"
+    depends_on:
+      tracecart-postgres:
+        condition: service_healthy
+    networks:
+      - tracecart-network
+    healthcheck: *service-healthcheck
+    stop_grace_period: 30s
+
+  tracecart-order-service:
+    build:
+      context: .
+      dockerfile: services/order-service/Dockerfile
+    image: tracecart-order-service:local
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DB_HOST: tracecart-postgres
+      DB_PORT: 5432
+      DB_NAME: tracecart_orders
+      DB_USER: ${ORDER_DB_USER:-tracecart_order}
+      DB_PASSWORD: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in .env}
+      PAYMENT_SERVICE_URL: ${PAYMENT_SERVICE_URL:-http://tracecart-payment-service:8000}
+      PAYMENT_SERVICE_TIMEOUT_SECONDS: ${PAYMENT_SERVICE_TIMEOUT_SECONDS:-5}
+    ports:
+      - "${ORDER_SERVICE_PORT:-8000}:8000"
+    depends_on:
+      tracecart-postgres:
+        condition: service_healthy
+      tracecart-payment-service:
+        condition: service_healthy
+    networks:
+      - tracecart-network
+    healthcheck: *service-healthcheck
+    stop_grace_period: 30s
+
+networks:
+  tracecart-network:
+    name: tracecart-network
+
+volumes:
+  tracecart-postgres-data:
+    name: tracecart-postgres-data

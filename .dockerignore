@@ -1,0 +1,19 @@
+# Images are built with the repository root as context; only services/ is needed.
+.git
+.gitignore
+.gitattributes
+.env
+.env.*
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/venv
+.vscode
+.idea
+infrastructure
+scripts
+README.md
+compose.yaml
