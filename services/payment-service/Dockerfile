@@ -1,5 +1,6 @@
 # Build context: repository root (see compose.yaml), so the root .dockerignore applies.
-FROM python:3.13.9-slim
+# Minor-version tag (not a patch pin) so rebuilds pick up the latest Python patch and Debian base.
+FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -9,6 +10,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     GRACEFUL_SHUTDOWN_SECONDS=20
 
 WORKDIR /app
+
+# Apply pending Debian security fixes and upgrade pip, which the base image may ship outdated.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --upgrade pip
 
 RUN groupadd --system app && useradd --system --gid app --no-create-home app
 
