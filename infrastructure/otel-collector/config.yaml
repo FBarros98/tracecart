@@ -1,0 +1,103 @@
+# OpenTelemetry Collector: receives OTLP from both services and forwards it to Datadog.
+# DD_API_KEY and DD_SITE come from the environment (compose.yaml -> .env); never hardcode them here.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  # Container infrastructure metrics (CPU, memory, network, block I/O) read from the Docker API.
+  # Needs the Docker socket mounted in the collector (see compose.yaml).
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 15s
+    container_labels_to_metric_labels:
+      com.docker.compose.project: compose.project
+      com.docker.compose.service: compose.service
+      # Set in compose.yaml on every container (Datadog version/env tags).
+      tracecart.service.version: service.version
+      tracecart.environment: deployment.environment.name
+    metrics:
+      container.restarts:
+        enabled: true
+      container.uptime:
+        enabled: true
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  # Readiness checks query the database every 10s. Their HTTP span is excluded in the services
+  # (OTEL_PYTHON_FASTAPI_EXCLUDED_URLS), so the DB spans arrive as root CLIENT spans: drop them.
+  # Spans inside a real request always have a SERVER parent and are kept.
+  filter/readiness-noise:
+    error_mode: ignore
+    traces:
+      span:
+        - IsRootSpan() and kind == SPAN_KIND_CLIENT
+  # Same noise on the log side: Uvicorn access lines for the health checks (every 10s).
+  filter/health-access-logs:
+    error_mode: ignore
+    logs:
+      log_record:
+        - instrumentation_scope.name == "uvicorn.access" and IsMatch(body, "/health/")
+  # docker_stats sees every container on the Docker daemon: keep only this Compose project.
+  filter/other-projects:
+    error_mode: ignore
+    metrics:
+      metric:
+        - resource.attributes["compose.project"] != "tracecart"
+  # Docker names the containers "<project>-<service>-<n>"; use the Compose service name instead, so
+  # container.name (container_name tag) matches what the services send with their own telemetry.
+  # The same name becomes service.name (Datadog service tag), as in the services' OTEL_SERVICE_NAME.
+  transform/container-name:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["container.name"], attributes["compose.service"]) where attributes["compose.service"] != nil
+          - set(attributes["service.name"], attributes["compose.service"]) where attributes["compose.service"] != nil
+  batch:
+    send_batch_size: 1000
+    timeout: 5s
+
+connectors:
+  # Computes APM trace metrics (hits, errors, latency) that Datadog needs for the service pages.
+  datadog/connector:
+
+exporters:
+  datadog/exporter:
+    api:
+      key: ${env:DD_API_KEY}
+      site: ${env:DD_SITE}
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/readiness-noise, batch]
+      exporters: [datadog/connector, datadog/exporter]
+    metrics:
+      receivers: [otlp, datadog/connector]
+      processors: [memory_limiter, batch]
+      exporters: [datadog/exporter]
+    # Separate pipeline so the docker_stats filter/transform never touch application metrics.
+    metrics/docker:
+      receivers: [docker_stats]
+      processors: [memory_limiter, filter/other-projects, transform/container-name, batch]
+      exporters: [datadog/exporter]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/health-access-logs, batch]
+      exporters: [datadog/exporter]
+  telemetry:
+    logs:
+      level: info

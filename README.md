@@ -2,8 +2,10 @@
 
 Mini e-commerce de pedidos, 100% backend (APIs REST), feito para servir de base a exercícios de
 observabilidade. Esta é a **Etapa 1**: aplicação, persistência, comunicação entre microsserviços,
-injeção de falhas e infraestrutura local com Docker Compose. Observabilidade (OpenTelemetry, Cribl,
-métricas, dashboards) e Kubernetes ficam para etapas futuras e **não** estão implementados aqui.
+injeção de falhas e infraestrutura local com Docker Compose. Os serviços já têm instrumentação
+automática do OpenTelemetry (traces e métricas HTTP), enviada por um OpenTelemetry Collector ao
+Datadog; Cribl, métricas de negócio, dashboards e Kubernetes ficam para etapas futuras e **não**
+estão implementados aqui.
 
 ## Arquitetura
 
@@ -51,6 +53,7 @@ tracecart/
 │   │   └── Dockerfile
 │   └── payment-service/           # mesma organização (sem clients/); services/fault_injector.py
 ├── infrastructure/postgres/init/01-create-databases.sql   # cria roles e bancos no 1º start
+├── infrastructure/otel-collector/config.yaml              # OTel Collector: OTLP → Datadog
 ├── scripts/
 │   ├── seed.py                    # dados de demonstração
 │   ├── load_generator.py          # gerador de tráfego
@@ -83,6 +86,8 @@ script de init do Postgres só roda com o volume vazio.
 | Banco | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `ORDER_DB_USER`, `ORDER_DB_PASSWORD`, `PAYMENT_DB_USER`, `PAYMENT_DB_PASSWORD` |
 | Portas no host | `ORDER_SERVICE_PORT` (8000), `PAYMENT_SERVICE_PORT` (8001) |
 | Comunicação | `PAYMENT_SERVICE_URL` (`http://tracecart-payment-service:8000`), `PAYMENT_SERVICE_TIMEOUT_SECONDS` (5) |
+| OpenTelemetry | `OTEL_SDK_DISABLED` (false), `OTEL_TRACES_EXPORTER` (otlp), `OTEL_METRICS_EXPORTER` (otlp), `OTEL_LOGS_EXPORTER` (otlp), `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://tracecart-otel-collector:4317`), `OTEL_EXPORTER_OTLP_PROTOCOL` (grpc), `ORDER_SERVICE_VERSION` / `PAYMENT_SERVICE_VERSION` (1.0.0, viram `service.version`). Lidas pelo SDK do OTel, não pelo `pydantic-settings`; as demais `OTEL_*` (nome do serviço, amostragem, exclusões) são fixas no `compose.yaml` |
+| Datadog (Collector) | `DD_API_KEY` (obrigatória; a chave real fica só no `.env`), `DD_SITE` (`datadoghq.com`) |
 | Falhas | ver [Cenários de falha](#cenários-de-falha) |
 
 ## Executar com Docker Compose
@@ -257,3 +262,29 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
   A pequena duplicação de utilitários (logging, config) é intencional, para não acoplar os serviços.
 - **CPF** é validado (formato e dígitos verificadores) e armazenado normalizado com 11 dígitos. Os
   dados de teste usam apenas CPFs sintéticos. O mascaramento fica para a etapa com Cribl Stream.
+- **OpenTelemetry por instrumentação automática.** O Uvicorn roda sob `opentelemetry-instrument`
+  (o Alembic não), configurado só por variáveis `OTEL_*`, sem mudanças no código da aplicação.
+  FastAPI, HTTPX e SQLAlchemy geram os spans e o HTTPX propaga o `traceparent` (W3C), então o
+  pagamento vira um único trace entre os dois serviços. Os health checks são excluídos e a
+  instrumentação do psycopg é desligada para não duplicar os spans do SQLAlchemy. Os logs também
+  são exportados via OTLP sem mudança de código: a instrumentação de logging adiciona um handler ao
+  logger raiz e o preserva no `basicConfig(force=True)` de `core/logging.py`. Cada log emitido
+  durante uma requisição leva o `trace_id`/`span_id`, o que correlaciona logs e traces no backend.
+- **Datadog via OpenTelemetry Collector, sem Datadog Agent.** Os serviços só falam OTLP com o
+  `tracecart-otel-collector` (contrib, config em `infrastructure/otel-collector/config.yaml`), que
+  exporta para o Datadog. Trocar de backend (ou inserir o Cribl) muda só o Collector. O
+  `datadog/connector` calcula as métricas de APM (hits, erros, latência) a partir dos traces, e
+  filtros descartam o ruído dos health checks: spans de banco do readiness (spans raiz do tipo
+  CLIENT) e as linhas de access log do Uvicorn para `/health/`. Containers não viram hosts: cada
+  serviço envia `container.name` (tag `container_name` no Datadog) e o host reportado é o do
+  Collector. Métricas de infraestrutura dos containers (CPU, memória, rede, block I/O, restarts)
+  vêm do receiver `docker_stats` do mesmo Collector, que lê o socket do Docker (montado `:ro`, com o
+  Collector como root, aceitável só neste laboratório local). Elas ficam restritas ao projeto
+  `tracecart` e o `container.name` é reescrito com o nome do serviço no Compose, igual ao enviado
+  pelos próprios serviços.
+- **Unified service tagging.** Todo sinal leva `service.name`, `deployment.environment.name` e
+  `service.version` (tags `service`, `env` e `version` no Datadog). Nos serviços vêm de
+  `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`; nas métricas `container.*`, de labels Docker
+  (`tracecart.service.version`, `tracecart.environment`) mapeadas pelo `docker_stats`, com
+  `service.name` = nome do serviço no Compose. A versão de cada serviço sai de uma única variável
+  (`ORDER_SERVICE_VERSION`/`PAYMENT_SERVICE_VERSION`), usada nos dois caminhos.

@@ -26,4 +26,5 @@ STOPSIGNAL SIGTERM
 
 # Migrations run before the server starts; `exec` makes Uvicorn PID 1 so it receives SIGTERM
 # directly and shuts down gracefully (finishes in-flight requests, runs the lifespan shutdown).
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT} --timeout-graceful-shutdown ${GRACEFUL_SHUTDOWN_SECONDS}"]
+# `opentelemetry-instrument` wraps only Uvicorn (not Alembic); it is configured via OTEL_* env vars.
+CMD ["sh", "-c", "alembic upgrade head && exec opentelemetry-instrument uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT} --timeout-graceful-shutdown ${GRACEFUL_SHUTDOWN_SECONDS}"]

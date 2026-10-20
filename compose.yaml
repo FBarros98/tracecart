@@ -11,10 +11,34 @@ x-service-healthcheck: &service-healthcheck
   retries: 5
   start_period: 20s
 
+# OpenTelemetry zero-code instrumentation (`opentelemetry-instrument` in the Dockerfiles).
+# Read by the OTel SDK itself, not by app/core/config.py. Each service adds OTEL_SERVICE_NAME and
+# OTEL_RESOURCE_ATTRIBUTES (container.name becomes the container_name tag in Datadog; the host stays
+# the collector's, since containers are not hosts).
+x-otel-environment: &otel-environment
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
+  OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-otlp}
+  # The logging instrumentation adds an OTel handler to the root logger and keeps it across the
+  # basicConfig(force=True) in core/logging.py, so logs go both to stdout and to the collector.
+  OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-otlp}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tracecart-otel-collector:4317}
+  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
+  OTEL_TRACES_SAMPLER: parentbased_always_on
+  # Health checks run every 10s; tracing them would only add noise.
+  OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: "health/.*"
+  # SQLAlchemy instrumentation already traces every query; psycopg would duplicate the spans.
+  OTEL_PYTHON_DISABLED_INSTRUMENTATIONS: psycopg
+
 services:
   tracecart-postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Read by the collector's docker_stats receiver: service.version and deployment.environment.name
+    # of the container metrics (service.name comes from the Compose service label).
+    labels:
+      tracecart.service.version: "16"
+      tracecart.environment: ${ENVIRONMENT:-local}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (cp .env.example .env)}
@@ -38,13 +62,47 @@ services:
       retries: 10
       start_period: 10s
 
+  tracecart-otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    restart: unless-stopped
+    # Read by the collector's docker_stats receiver: service.version and deployment.environment.name
+    # of the container metrics (service.name comes from the Compose service label).
+    labels:
+      tracecart.service.version: "0.162.0"
+      tracecart.environment: ${ENVIRONMENT:-local}
+    # Stable host name reported to Datadog (otherwise it would be the random container id).
+    hostname: tracecart-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    # Root is needed to read the Docker socket (the image runs as uid 10001). The socket grants
+    # control of the whole Docker daemon even when mounted :ro; acceptable for this local lab only.
+    user: "0"
+    environment:
+      DD_API_KEY: ${DD_API_KEY:?Set DD_API_KEY in .env}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+    volumes:
+      - ./infrastructure/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      # Source of the docker_stats receiver (container CPU, memory, network, block I/O).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # No published ports: the services reach OTLP (4317/4318) through the Compose network.
+    # The image is distroless (no shell/curl), so there is no Compose healthcheck.
+    networks:
+      - tracecart-network
+
   tracecart-payment-service:
     build:
       context: .
       dockerfile: services/payment-service/Dockerfile
     image: tracecart-payment-service:local
     restart: unless-stopped
+    # Read by the collector's docker_stats receiver: service.version and deployment.environment.name
+    # of the container metrics (service.name comes from the Compose service label).
+    labels:
+      tracecart.service.version: "${PAYMENT_SERVICE_VERSION:-1.0.0}"
+      tracecart.environment: ${ENVIRONMENT:-local}
     environment:
+      <<: *otel-environment
+      OTEL_SERVICE_NAME: tracecart-payment-service
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${ENVIRONMENT:-local},service.version=${PAYMENT_SERVICE_VERSION:-1.0.0},container.name=tracecart-payment-service
       ENVIRONMENT: ${ENVIRONMENT:-local}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DB_HOST: tracecart-postgres
@@ -66,6 +124,8 @@ services:
     depends_on:
       tracecart-postgres:
         condition: service_healthy
+      tracecart-otel-collector:
+        condition: service_started
     networks:
       - tracecart-network
     healthcheck: *service-healthcheck
@@ -77,7 +137,15 @@ services:
       dockerfile: services/order-service/Dockerfile
     image: tracecart-order-service:local
     restart: unless-stopped
+    # Read by the collector's docker_stats receiver: service.version and deployment.environment.name
+    # of the container metrics (service.name comes from the Compose service label).
+    labels:
+      tracecart.service.version: "${ORDER_SERVICE_VERSION:-1.0.0}"
+      tracecart.environment: ${ENVIRONMENT:-local}
     environment:
+      <<: *otel-environment
+      OTEL_SERVICE_NAME: tracecart-order-service
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=${ENVIRONMENT:-local},service.version=${ORDER_SERVICE_VERSION:-1.0.0},container.name=tracecart-order-service
       ENVIRONMENT: ${ENVIRONMENT:-local}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DB_HOST: tracecart-postgres
@@ -92,6 +160,8 @@ services:
     depends_on:
       tracecart-postgres:
         condition: service_healthy
+      tracecart-otel-collector:
+        condition: service_started
       tracecart-payment-service:
         condition: service_healthy
     networks:
