@@ -70,12 +70,14 @@ class PaymentService:
         decline_reason = self.faults.decline_reason()
         status = PaymentStatus.DECLINED if decline_reason else PaymentStatus.APPROVED
         payment = await self._finalize(payment.id, status, decline_reason, started, inject_db_failure=True)
+        # Intencional: o cartão (sintético) vai em claro no log para que o Cribl o mascare na pipeline.
         logger.info(
-            "Payment processed: payment_id=%s order_id=%s method=%s amount=%s status=%s "
+            "Payment processed: payment_id=%s order_id=%s method=%s card_number=%s amount=%s status=%s "
             "failure_reason=%s processing_time_ms=%d",
             payment.id,
             payment.order_id,
             payment.method,
+            data.card_number or "-",
             payment.amount,
             payment.status,
             payment.failure_reason,

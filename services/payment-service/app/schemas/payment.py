@@ -11,6 +11,9 @@ class PaymentCreate(BaseModel):
     order_id: uuid.UUID
     amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2, examples=["199.90"])
     method: PaymentMethod
+    card_number: str | None = Field(
+        default=None, pattern=r"^\d{13,19}$", description="Synthetic card number. Never stored."
+    )
 
 
 class PaymentRead(BaseModel):

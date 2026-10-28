@@ -30,7 +30,8 @@ class CustomerService:
         except IntegrityError as exc:
             # A concurrent request inserted the same email/CPF between the check and the commit.
             raise ConflictError("A customer with this email or CPF already exists") from exc
-        logger.info("Customer created: customer_id=%s", customer.id)
+        # Intencional: o CPF (sintético) vai em claro no log para que o Cribl o mascare na pipeline.
+        logger.info("Customer created: customer_id=%s cpf=%s", customer.id, customer.cpf)
         return customer
 
     async def get(self, customer_id: uuid.UUID) -> Customer:

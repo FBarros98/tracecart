@@ -25,7 +25,7 @@ from app.core.exceptions import (
     PaymentServiceError,
 )
 from app.models import Order, OrderItem
-from app.models.enums import OrderStatus
+from app.models.enums import OrderStatus, PaymentMethod
 from app.repositories.customer_repository import CustomerRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.product_repository import ProductRepository
@@ -103,7 +103,9 @@ class OrderService:
         )
         return order
 
-    async def pay(self, order_id: uuid.UUID) -> tuple[Order, PaymentResult | None]:
+    async def pay(
+        self, order_id: uuid.UUID, card_number: str | None = None
+    ) -> tuple[Order, PaymentResult | None]:
         async with self.session.begin():
             order = await self._get_for_update(order_id)
             if order.status == OrderStatus.CANCELLED:
@@ -116,7 +118,7 @@ class OrderService:
             order.status = OrderStatus.PAYMENT_PROCESSING
 
         try:
-            payment = await self._request_payment(order, reconciling)
+            payment = await self._request_payment(order, reconciling, card_number)
         except PaymentServiceError as exc:
             logger.warning(
                 "Payment outcome unknown for order_id=%s; order kept in PAYMENT_PROCESSING: %s",
@@ -148,7 +150,9 @@ class OrderService:
         logger.info("Order cancelled: order_id=%s", order_id)
         return order
 
-    async def _request_payment(self, order: Order, reconciling: bool) -> PaymentResult:
+    async def _request_payment(
+        self, order: Order, reconciling: bool, card_number: str | None = None
+    ) -> PaymentResult:
         if reconciling:
             existing = await self.payment_client.get_payment_by_order(order.id)
             logger.info(
@@ -160,7 +164,9 @@ class OrderService:
                 return existing
         # The Payment Service is idempotent by order_id, so retrying the POST is safe.
         logger.info("Requesting payment: order_id=%s amount=%s", order.id, order.total_amount)
-        return await self.payment_client.create_payment(order.id, order.total_amount, order.payment_method)
+        # The card number is never persisted: it is only forwarded, and only for card payments.
+        card = card_number if order.payment_method == PaymentMethod.CREDIT_CARD else None
+        return await self.payment_client.create_payment(order.id, order.total_amount, order.payment_method, card)
 
     async def _apply_payment_result(self, order_id: uuid.UUID, payment: PaymentResult) -> Order:
         async with self.session.begin():

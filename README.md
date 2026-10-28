@@ -3,9 +3,10 @@
 Mini e-commerce de pedidos, 100% backend (APIs REST), feito para servir de base a exercícios de
 observabilidade. Esta é a **Etapa 1**: aplicação, persistência, comunicação entre microsserviços,
 injeção de falhas e infraestrutura local com Docker Compose. Os serviços já têm instrumentação
-automática do OpenTelemetry (traces e métricas HTTP), enviada por um OpenTelemetry Collector ao
-Datadog; Cribl, métricas de negócio, dashboards e Kubernetes ficam para etapas futuras e **não**
-estão implementados aqui.
+automática do OpenTelemetry (traces, métricas HTTP e logs), enviada por um OpenTelemetry
+Collector: traces direto ao Datadog, logs e métricas ao Cribl Cloud (o roteamento dentro do Cribl é
+configurado no próprio Cribl.Cloud, fora deste repositório). Métricas de negócio, dashboards e
+Kubernetes ficam para etapas futuras e **não** estão implementados aqui.
 
 ## Arquitetura
 
@@ -53,7 +54,7 @@ tracecart/
 │   │   └── Dockerfile
 │   └── payment-service/           # mesma organização (sem clients/); services/fault_injector.py
 ├── infrastructure/postgres/init/01-create-databases.sql   # cria roles e bancos no 1º start
-├── infrastructure/otel-collector/config.yaml              # OTel Collector: OTLP → Datadog
+├── infrastructure/otel-collector/config.yaml              # OTel Collector: traces → Datadog, logs/métricas → Cribl
 ├── scripts/
 │   ├── seed.py                    # dados de demonstração
 │   ├── load_generator.py          # gerador de tráfego
@@ -88,6 +89,7 @@ script de init do Postgres só roda com o volume vazio.
 | Comunicação | `PAYMENT_SERVICE_URL` (`http://tracecart-payment-service:8000`), `PAYMENT_SERVICE_TIMEOUT_SECONDS` (5) |
 | OpenTelemetry | `OTEL_SDK_DISABLED` (false), `OTEL_TRACES_EXPORTER` (otlp), `OTEL_METRICS_EXPORTER` (otlp), `OTEL_LOGS_EXPORTER` (otlp), `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://tracecart-otel-collector:4317`), `OTEL_EXPORTER_OTLP_PROTOCOL` (grpc), `ORDER_SERVICE_VERSION` / `PAYMENT_SERVICE_VERSION` (1.0.0, viram `service.version`). Lidas pelo SDK do OTel, não pelo `pydantic-settings`; as demais `OTEL_*` (nome do serviço, amostragem, exclusões) são fixas no `compose.yaml` |
 | Datadog (Collector) | `DD_API_KEY` (obrigatória; a chave real fica só no `.env`), `DD_SITE` (`datadoghq.com`) |
+| Cribl Cloud (Collector) | `CRIBL_OTLP_ENDPOINT` (obrigatória; `default.main.<org>.cribl.cloud:4317`, Source OpenTelemetry do worker group com OTLP version 1.3.1, protocolo gRPC e TLS ligado), `CRIBL_AUTH_TOKEN` (obrigatória; token do Source, enviado como `authorization: Bearer <token>`) |
 | Falhas | ver [Cenários de falha](#cenários-de-falha) |
 
 ## Executar com Docker Compose
@@ -111,7 +113,7 @@ Não há passos manuais: o Postgres cria roles e bancos no primeiro start, e cad
 | `POST /customers`, `GET /customers`, `GET /customers/{id}` | clientes (`GET /customers` lista; usado pelo gerador de tráfego) |
 | `POST /products`, `GET /products`, `GET /products/{id}` | produtos e estoque (`?category=BOOKS&active_only=true`) |
 | `POST /orders`, `GET /orders`, `GET /orders/{id}` | pedidos (`?status=PAID&customer_id=...`) |
-| `POST /orders/{id}/pay`, `POST /orders/{id}/cancel` | pagamento/reconciliação e cancelamento |
+| `POST /orders/{id}/pay`, `POST /orders/{id}/cancel` | pagamento/reconciliação (corpo opcional `{"card_number": "4111 1111 1111 1111"}`, usado só em `CREDIT_CARD`) e cancelamento |
 
 | Payment Service | |
 |---|---|
@@ -261,7 +263,12 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
 - **Serviços independentes.** Cada serviço tem código, dependências, migrações e imagem próprios.
   A pequena duplicação de utilitários (logging, config) é intencional, para não acoplar os serviços.
 - **CPF** é validado (formato e dígitos verificadores) e armazenado normalizado com 11 dígitos. Os
-  dados de teste usam apenas CPFs sintéticos. O mascaramento fica para a etapa com Cribl Stream.
+  dados de teste usam apenas CPFs sintéticos. O log `Customer created` emite o CPF (11 dígitos) em
+  claro de propósito: o mascaramento é responsabilidade da pipeline do Cribl, não da aplicação.
+- **Número de cartão** (sintético, validado por Luhn) chega em `POST /orders/{id}/pay`, é repassado
+  ao Payment Service (`card_number` opcional em `POST /payments`) e **nunca é persistido**. O log
+  `Payment processed` do Payment Service o emite em claro (`card_number=4111111111111111`, ou `-`
+  se ausente), também de propósito, para o Cribl mascarar.
 - **OpenTelemetry por instrumentação automática.** O Uvicorn roda sob `opentelemetry-instrument`
   (o Alembic não), configurado só por variáveis `OTEL_*`, sem mudanças no código da aplicação.
   FastAPI, HTTPX e SQLAlchemy geram os spans e o HTTPX propaga o `traceparent` (W3C), então o
@@ -282,6 +289,12 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
   Collector como root, aceitável só neste laboratório local). Elas ficam restritas ao projeto
   `tracecart` e o `container.name` é reescrito com o nome do serviço no Compose, igual ao enviado
   pelos próprios serviços.
+- **Logs e métricas via Cribl Cloud; traces direto ao Datadog.** O Collector envia logs e métricas
+  (aplicação e `docker_stats`) por OTLP/gRPC com TLS ao Source OpenTelemetry do Cribl.Cloud,
+  autenticado por token; o encaminhamento ao destino final é configurado no Cribl. Traces e as
+  métricas de APM do `datadog/connector` continuam indo direto ao `datadog/exporter` (pipeline
+  `metrics/apm`), porque as páginas de serviço do APM dependem delas e o Cribl não exporta traces
+  de APM para o Datadog. Os filtros de ruído continuam no Collector, antes do Cribl.
 - **Unified service tagging.** Todo sinal leva `service.name`, `deployment.environment.name` e
   `service.version` (tags `service`, `env` e `version` no Datadog). Nos serviços vêm de
   `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`; nas métricas `container.*`, de labels Docker

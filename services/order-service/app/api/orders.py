@@ -8,7 +8,7 @@ from app.api.dependencies import OrderServiceDep
 from app.models import Order
 from app.models.enums import OrderStatus
 from app.schemas.common import ErrorResponse
-from app.schemas.order import OrderCreate, OrderPaymentResponse, OrderRead
+from app.schemas.order import OrderCreate, OrderPaymentResponse, OrderRead, PayOrderRequest
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -50,8 +50,13 @@ async def get_order(order_id: uuid.UUID, service: OrderServiceDep) -> Order:
         504: {"model": ErrorResponse, "description": "Payment Service timed out; outcome unknown"},
     },
 )
-async def pay_order(order_id: uuid.UUID, response: Response, service: OrderServiceDep) -> OrderPaymentResponse:
-    order, payment = await service.pay(order_id)
+async def pay_order(
+    order_id: uuid.UUID,
+    response: Response,
+    service: OrderServiceDep,
+    payload: PayOrderRequest | None = None,
+) -> OrderPaymentResponse:
+    order, payment = await service.pay(order_id, payload.card_number if payload else None)
     if order.status == OrderStatus.PAYMENT_PROCESSING:
         response.status_code = status.HTTP_202_ACCEPTED
     return OrderPaymentResponse(order=OrderRead.model_validate(order), payment=payment)

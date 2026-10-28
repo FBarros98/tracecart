@@ -2,8 +2,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.card import normalize_card_number
 from app.models.enums import OrderStatus, PaymentMethod
 from app.schemas.payment import PaymentResult
 
@@ -20,6 +21,20 @@ class OrderCreate(BaseModel):
     customer_id: uuid.UUID
     payment_method: PaymentMethod
     items: list[OrderItemCreate] = Field(min_length=1, max_length=MAX_ITEMS_PER_ORDER)
+
+
+class PayOrderRequest(BaseModel):
+    card_number: str | None = Field(
+        default=None,
+        description="Synthetic card number, used only when the order's payment method is CREDIT_CARD. "
+        "Never stored; forwarded to the Payment Service.",
+        examples=["4111 1111 1111 1111"],
+    )
+
+    @field_validator("card_number")
+    @classmethod
+    def _validate_card_number(cls, value: str | None) -> str | None:
+        return None if value is None else normalize_card_number(value)
 
 
 class OrderItemRead(BaseModel):

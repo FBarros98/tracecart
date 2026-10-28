@@ -79,6 +79,8 @@ services:
     environment:
       DD_API_KEY: ${DD_API_KEY:?Set DD_API_KEY in .env}
       DD_SITE: ${DD_SITE:-datadoghq.com}
+      CRIBL_OTLP_ENDPOINT: ${CRIBL_OTLP_ENDPOINT:?Set CRIBL_OTLP_ENDPOINT in .env}
+      CRIBL_AUTH_TOKEN: ${CRIBL_AUTH_TOKEN:?Set CRIBL_AUTH_TOKEN in .env}
     volumes:
       - ./infrastructure/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
       # Source of the docker_stats receiver (container CPU, memory, network, block I/O).

@@ -1,5 +1,7 @@
-# OpenTelemetry Collector: receives OTLP from both services and forwards it to Datadog.
-# DD_API_KEY and DD_SITE come from the environment (compose.yaml -> .env); never hardcode them here.
+# OpenTelemetry Collector: receives OTLP from both services. Traces (and the APM metrics computed
+# from them) go straight to Datadog; logs and metrics go to Cribl Cloud, which routes them onwards.
+# DD_API_KEY, DD_SITE, CRIBL_OTLP_ENDPOINT and CRIBL_AUTH_TOKEN come from the environment
+# (compose.yaml -> .env); never hardcode them here.
 
 receivers:
   otlp:
@@ -73,6 +75,12 @@ exporters:
     api:
       key: ${env:DD_API_KEY}
       site: ${env:DD_SITE}
+  # OpenTelemetry Source of the Cribl Cloud worker group (OTLP/gRPC over TLS, public certificate).
+  otlp/cribl:
+    endpoint: ${env:CRIBL_OTLP_ENDPOINT}
+    headers:
+      # Must match the auth token configured on the Cribl OpenTelemetry Source.
+      authorization: "Bearer ${env:CRIBL_AUTH_TOKEN}"
 
 extensions:
   health_check:
@@ -84,20 +92,26 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, filter/readiness-noise, batch]
-      exporters: [datadog/connector, datadog/exporter]
+      exporters: [otlp/cribl]
     metrics:
-      receivers: [otlp, datadog/connector]
+      receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [datadog/exporter]
+      exporters: [otlp/cribl]
+    # APM trace metrics stay with the traces: the Datadog exporter must receive them directly to
+    # feed the APM service pages.
+    metrics/apm:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/cribl]
     # Separate pipeline so the docker_stats filter/transform never touch application metrics.
     metrics/docker:
       receivers: [docker_stats]
       processors: [memory_limiter, filter/other-projects, transform/container-name, batch]
-      exporters: [datadog/exporter]
+      exporters: [otlp/cribl]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, filter/health-access-logs, batch]
-      exporters: [datadog/exporter]
+      exporters: [otlp/cribl]
   telemetry:
     logs:
       level: info

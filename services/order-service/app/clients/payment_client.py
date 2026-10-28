@@ -20,9 +20,11 @@ class PaymentClient:
         self._http = http_client
 
     async def create_payment(
-        self, order_id: uuid.UUID, amount: Decimal, method: PaymentMethod
+        self, order_id: uuid.UUID, amount: Decimal, method: PaymentMethod, card_number: str | None = None
     ) -> PaymentResult:
         payload = {"order_id": str(order_id), "amount": str(amount), "method": method.value}
+        if card_number is not None:
+            payload["card_number"] = card_number
         response = await self._send("POST", "/payments", json=payload)
         if response.status_code in (200, 201):
             return self._parse(response)

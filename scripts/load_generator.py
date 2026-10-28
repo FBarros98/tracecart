@@ -22,6 +22,8 @@ from collections import Counter, defaultdict
 import httpx
 
 PAYMENT_METHODS = ("PIX", "CREDIT_CARD", "BOLETO")
+# Public test card numbers (valid Luhn), never real cards.
+TEST_CARD_NUMBERS = ("4111111111111111", "5555555555554444", "4242424242424242")
 OUTCOME_UNKNOWN_CODES = {202, 502, 504}
 
 
@@ -79,10 +81,15 @@ async def journey(client: httpx.AsyncClient, stats: Stats, customers: list[str],
         response = await call(client, stats, "cancel_order", "POST", f"/orders/{order_id}/cancel")
         stats.outcomes["CANCELLED" if response is not None and response.status_code == 200 else "cancel_failed"] += 1
     else:
-        response = await call(client, stats, "pay_order", "POST", f"/orders/{order_id}/pay")
+        pay_kwargs = {}
+        if payload["payment_method"] == "CREDIT_CARD":
+            pay_kwargs["json"] = {"card_number": random.choice(TEST_CARD_NUMBERS)}
+        response = await call(client, stats, "pay_order", "POST", f"/orders/{order_id}/pay", **pay_kwargs)
         if response is not None and response.status_code in OUTCOME_UNKNOWN_CODES:
             await asyncio.sleep(1)
-            response = await call(client, stats, "reconcile_payment", "POST", f"/orders/{order_id}/pay")
+            response = await call(
+                client, stats, "reconcile_payment", "POST", f"/orders/{order_id}/pay", **pay_kwargs
+            )
 
     response = await call(client, stats, "get_order", "GET", f"/orders/{order_id}")
     if response is not None and response.status_code == 200:
