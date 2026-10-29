@@ -4,8 +4,8 @@ Mini e-commerce de pedidos, 100% backend (APIs REST), feito para servir de base 
 observabilidade. Esta é a **Etapa 1**: aplicação, persistência, comunicação entre microsserviços,
 injeção de falhas e infraestrutura local com Docker Compose. Os serviços já têm instrumentação
 automática do OpenTelemetry (traces, métricas HTTP e logs), enviada por um OpenTelemetry
-Collector: traces direto ao Datadog, logs e métricas ao Cribl Cloud (o roteamento dentro do Cribl é
-configurado no próprio Cribl.Cloud, fora deste repositório). Métricas de negócio, dashboards e
+Collector: toda a telemetria (traces, métricas e logs) vai ao Cribl self-hosted (container do
+Compose); o roteamento dentro do Cribl é configurado na UI dele, fora deste repositório. Métricas de negócio, dashboards e
 Kubernetes ficam para etapas futuras e **não** estão implementados aqui.
 
 ## Arquitetura
@@ -54,7 +54,7 @@ tracecart/
 │   │   └── Dockerfile
 │   └── payment-service/           # mesma organização (sem clients/); services/fault_injector.py
 ├── infrastructure/postgres/init/01-create-databases.sql   # cria roles e bancos no 1º start
-├── infrastructure/otel-collector/config.yaml              # OTel Collector: traces → Datadog, logs/métricas → Cribl
+├── infrastructure/otel-collector/config.yaml              # OTel Collector: traces/métricas/logs → Cribl
 ├── scripts/
 │   ├── seed.py                    # dados de demonstração
 │   ├── load_generator.py          # gerador de tráfego
@@ -88,8 +88,7 @@ script de init do Postgres só roda com o volume vazio.
 | Portas no host | `ORDER_SERVICE_PORT` (8000), `PAYMENT_SERVICE_PORT` (8001) |
 | Comunicação | `PAYMENT_SERVICE_URL` (`http://tracecart-payment-service:8000`), `PAYMENT_SERVICE_TIMEOUT_SECONDS` (5) |
 | OpenTelemetry | `OTEL_SDK_DISABLED` (false), `OTEL_TRACES_EXPORTER` (otlp), `OTEL_METRICS_EXPORTER` (otlp), `OTEL_LOGS_EXPORTER` (otlp), `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://tracecart-otel-collector:4317`), `OTEL_EXPORTER_OTLP_PROTOCOL` (grpc), `ORDER_SERVICE_VERSION` / `PAYMENT_SERVICE_VERSION` (1.0.0, viram `service.version`). Lidas pelo SDK do OTel, não pelo `pydantic-settings`; as demais `OTEL_*` (nome do serviço, amostragem, exclusões) são fixas no `compose.yaml` |
-| Datadog (Collector) | `DD_API_KEY` (obrigatória; a chave real fica só no `.env`), `DD_SITE` (`datadoghq.com`) |
-| Cribl Cloud (Collector) | `CRIBL_OTLP_ENDPOINT` (obrigatória; `default.main.<org>.cribl.cloud:4317`, Source OpenTelemetry do worker group com OTLP version 1.3.1, protocolo gRPC e TLS ligado), `CRIBL_AUTH_TOKEN` (obrigatória; token do Source, enviado como `authorization: Bearer <token>`) |
+| Cribl self-hosted | `CRIBL_VERSION` (`4.20.4`, tag da imagem `cribl/cribl`; sempre fixa), `CRIBL_UI_PORT` (`9000`, porta da UI no host), `CRIBL_OTLP_ENDPOINT` (`tracecart-cribl:4317`, Source OpenTelemetry com OTLP version 1.3.1, protocolo gRPC, sem TLS), `CRIBL_AUTH_TOKEN` (opcional; token do Source, enviado como `authorization: Bearer <token>`) |
 | Falhas | ver [Cenários de falha](#cenários-de-falha) |
 
 ## Executar com Docker Compose
@@ -277,11 +276,10 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
   são exportados via OTLP sem mudança de código: a instrumentação de logging adiciona um handler ao
   logger raiz e o preserva no `basicConfig(force=True)` de `core/logging.py`. Cada log emitido
   durante uma requisição leva o `trace_id`/`span_id`, o que correlaciona logs e traces no backend.
-- **Datadog via OpenTelemetry Collector, sem Datadog Agent.** Os serviços só falam OTLP com o
+- **Tudo via OpenTelemetry Collector, sem Datadog Agent.** Os serviços só falam OTLP com o
   `tracecart-otel-collector` (contrib, config em `infrastructure/otel-collector/config.yaml`), que
-  exporta para o Datadog. Trocar de backend (ou inserir o Cribl) muda só o Collector. O
-  `datadog/connector` calcula as métricas de APM (hits, erros, latência) a partir dos traces, e
-  filtros descartam o ruído dos health checks: spans de banco do readiness (spans raiz do tipo
+  exporta tudo para o Cribl. Trocar de backend muda só o Cribl (ou o Collector). Filtros descartam
+  o ruído dos health checks: spans de banco do readiness (spans raiz do tipo
   CLIENT) e as linhas de access log do Uvicorn para `/health/`. Containers não viram hosts: cada
   serviço envia `container.name` (tag `container_name` no Datadog) e o host reportado é o do
   Collector. Métricas de infraestrutura dos containers (CPU, memória, rede, block I/O, restarts)
@@ -289,12 +287,14 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
   Collector como root, aceitável só neste laboratório local). Elas ficam restritas ao projeto
   `tracecart` e o `container.name` é reescrito com o nome do serviço no Compose, igual ao enviado
   pelos próprios serviços.
-- **Logs e métricas via Cribl Cloud; traces direto ao Datadog.** O Collector envia logs e métricas
-  (aplicação e `docker_stats`) por OTLP/gRPC com TLS ao Source OpenTelemetry do Cribl.Cloud,
-  autenticado por token; o encaminhamento ao destino final é configurado no Cribl. Traces e as
-  métricas de APM do `datadog/connector` continuam indo direto ao `datadog/exporter` (pipeline
-  `metrics/apm`), porque as páginas de serviço do APM dependem delas e o Cribl não exporta traces
-  de APM para o Datadog. Os filtros de ruído continuam no Collector, antes do Cribl.
+- **Toda a telemetria passa primeiro pelo Cribl self-hosted.** O Collector envia traces, métricas
+  (aplicação e `docker_stats`) e logs por OTLP/gRPC ao Source OpenTelemetry do container
+  `tracecart-cribl`, sem TLS (tráfego só na rede do Compose) e com token opcional; nada vai direto
+  ao Datadog. O encaminhamento ao destino final é configurado na UI do Cribl e persiste no volume
+  `tracecart-cribl-data`. O `datadog/connector` continua no Collector: calcula as métricas de APM
+  (hits, erros, latência) a partir dos traces já filtrados e as envia ao Cribl no pipeline
+  `metrics/apm`, para o Cribl encaminhá-las ao Datadog. Os filtros de ruído continuam no Collector,
+  antes do Cribl.
 - **Unified service tagging.** Todo sinal leva `service.name`, `deployment.environment.name` e
   `service.version` (tags `service`, `env` e `version` no Datadog). Nos serviços vêm de
   `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES`; nas métricas `container.*`, de labels Docker

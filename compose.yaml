@@ -62,6 +62,18 @@ services:
       retries: 10
       start_period: 10s
 
+  tracecart-cribl:
+    image: cribl/cribl:${CRIBL_VERSION:-4.20.4}
+    restart: unless-stopped
+    hostname: tracecart-cribl
+    ports:
+      # UI only; the OTLP Source (4317) is reached by the collector through the Compose network.
+      - "${CRIBL_UI_PORT:-9000}:9000"
+    volumes:
+      - tracecart-cribl-data:/opt/cribl/local
+    networks:
+      - tracecart-network
+
   tracecart-otel-collector:
     image: otel/opentelemetry-collector-contrib:0.162.0
     restart: unless-stopped
@@ -70,17 +82,18 @@ services:
     labels:
       tracecart.service.version: "0.162.0"
       tracecart.environment: ${ENVIRONMENT:-local}
-    # Stable host name reported to Datadog (otherwise it would be the random container id).
+    # Stable host name (otherwise it would be the random container id).
     hostname: tracecart-otel-collector
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     # Root is needed to read the Docker socket (the image runs as uid 10001). The socket grants
     # control of the whole Docker daemon even when mounted :ro; acceptable for this local lab only.
     user: "0"
     environment:
-      DD_API_KEY: ${DD_API_KEY:?Set DD_API_KEY in .env}
-      DD_SITE: ${DD_SITE:-datadoghq.com}
-      CRIBL_OTLP_ENDPOINT: ${CRIBL_OTLP_ENDPOINT:?Set CRIBL_OTLP_ENDPOINT in .env}
-      CRIBL_AUTH_TOKEN: ${CRIBL_AUTH_TOKEN:?Set CRIBL_AUTH_TOKEN in .env}
+      CRIBL_OTLP_ENDPOINT: ${CRIBL_OTLP_ENDPOINT:-tracecart-cribl:4317}
+      CRIBL_AUTH_TOKEN: ${CRIBL_AUTH_TOKEN:-}
+    depends_on:
+      tracecart-cribl:
+        condition: service_started
     volumes:
       - ./infrastructure/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
       # Source of the docker_stats receiver (container CPU, memory, network, block I/O).
@@ -178,3 +191,5 @@ networks:
 volumes:
   tracecart-postgres-data:
     name: tracecart-postgres-data
+  tracecart-cribl-data:
+    name: tracecart-cribl-data

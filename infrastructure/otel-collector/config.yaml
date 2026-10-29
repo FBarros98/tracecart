@@ -1,7 +1,7 @@
-# OpenTelemetry Collector: receives OTLP from both services. Traces (and the APM metrics computed
-# from them) go straight to Datadog; logs and metrics go to Cribl Cloud, which routes them onwards.
-# DD_API_KEY, DD_SITE, CRIBL_OTLP_ENDPOINT and CRIBL_AUTH_TOKEN come from the environment
-# (compose.yaml -> .env); never hardcode them here.
+# OpenTelemetry Collector: receives OTLP from both services. All telemetry (traces, metrics and
+# logs) goes to the self-hosted Cribl, which routes it onwards; nothing is sent directly to a backend.
+# CRIBL_OTLP_ENDPOINT and CRIBL_AUTH_TOKEN come from the environment (compose.yaml -> .env);
+# never hardcode them here.
 
 receivers:
   otlp:
@@ -67,19 +67,19 @@ processors:
     timeout: 5s
 
 connectors:
-  # Computes APM trace metrics (hits, errors, latency) that Datadog needs for the service pages.
+  # Computes APM trace metrics (hits, errors, latency) from the traces, so Datadog can build the
+  # service pages. Its output is a plain metrics stream (pipeline metrics/apm) that goes to Cribl.
   datadog/connector:
 
 exporters:
-  datadog/exporter:
-    api:
-      key: ${env:DD_API_KEY}
-      site: ${env:DD_SITE}
-  # OpenTelemetry Source of the Cribl Cloud worker group (OTLP/gRPC over TLS, public certificate).
+  # OpenTelemetry Source of the self-hosted Cribl (OTLP/gRPC, no TLS inside the Compose network).
   otlp/cribl:
     endpoint: ${env:CRIBL_OTLP_ENDPOINT}
+    tls:
+      insecure: true
     headers:
-      # Must match the auth token configured on the Cribl OpenTelemetry Source.
+      # Must match the auth token configured on the Cribl OpenTelemetry Source
+      # (if the Source has no authentication, the Source ignores it).
       authorization: "Bearer ${env:CRIBL_AUTH_TOKEN}"
 
 extensions:
@@ -92,15 +92,15 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, filter/readiness-noise, batch]
-      exporters: [otlp/cribl]
+      exporters: [otlp/cribl, datadog/connector]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlp/cribl]
-    # APM trace metrics stay with the traces: the Datadog exporter must receive them directly to
-    # feed the APM service pages.
+    # APM trace metrics computed from the (already filtered) traces above. Separate from `metrics`
+    # so the connector output never mixes with the application metrics.
     metrics/apm:
-      receivers: [otlp]
+      receivers: [datadog/connector]
       processors: [memory_limiter, batch]
       exporters: [otlp/cribl]
     # Separate pipeline so the docker_stats filter/transform never touch application metrics.
