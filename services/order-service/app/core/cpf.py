@@ -11,7 +11,6 @@ def _check_digit(digits: str) -> str:
 
 
 def normalize_cpf(value: str) -> str:
-    """Validate a CPF (format and check digits) and return its 11 digits."""
     value = value.strip()
     if not _CPF_FORMAT.fullmatch(value):
         raise ValueError("CPF must be formatted as 00000000000 or 000.000.000-00")

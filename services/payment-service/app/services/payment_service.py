@@ -1,15 +1,8 @@
-"""Payment processing.
+"""Payment processing, idempotent by order_id (unique).
 
-Idempotency: order_id is unique, so at most one payment exists per order. Processing happens in two
-short transactions:
-
-1. register: insert the payment as PROCESSING (or load the existing one). A finalized payment
-   (APPROVED/DECLINED) is returned as is. A PROCESSING/ERROR payment is (re)processed.
-2. finalize: a conditional UPDATE (... WHERE status = 'PROCESSING') sets the outcome. If two requests
-   race on the same order, the first writer wins and the other returns the stored result.
-
-A failure before finalize leaves the payment PROCESSING or ERROR, which a retry of the same request
-safely reprocesses.
+Two short transactions: register inserts the payment as PROCESSING (or loads the existing one;
+APPROVED/DECLINED are returned as is, PROCESSING/ERROR are reprocessed), and finalize sets the
+outcome with a conditional UPDATE, so the first writer wins. A failure in between is safe to retry.
 """
 
 import asyncio
@@ -95,7 +88,6 @@ class PaymentService:
             )
             if slow:
                 span.set_attribute("fraud.delay_seconds", settings.fraud_check_delay_seconds)
-                # No transaction is open here (see _register/_finalize), so the delay holds no DB connection.
                 await asyncio.sleep(settings.fraud_check_delay_seconds)
 
     async def _register(self, data: PaymentCreate) -> tuple[Payment, bool]:
@@ -133,7 +125,6 @@ class PaymentService:
         async with self.session.begin():
             payment = await self.payments.finalize(payment_id, status, failure_reason, elapsed_ms)
             if payment is None:
-                # Another request finalized this payment first; return the stored outcome.
                 payment = await self.payments.get(payment_id)
                 if payment is None:  # pragma: no cover
                     raise NotFoundError(f"Payment {payment_id} not found")

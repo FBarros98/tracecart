@@ -16,7 +16,6 @@ def _luhn_valid(digits: str) -> bool:
 
 
 def normalize_card_number(value: str) -> str:
-    """Validate a card number (format and Luhn checksum) and return its digits."""
     value = value.strip()
     if not _CARD_FORMAT.fullmatch(value):
         raise ValueError("Card number must have 13 to 19 digits, optionally grouped by spaces or hyphens")

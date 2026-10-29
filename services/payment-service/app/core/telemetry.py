@@ -9,7 +9,6 @@ HIGH_RISK_THRESHOLD = Decimal("1000.00")
 
 
 def risk_level(amount: Decimal) -> str:
-    """Risk tier used by the fraud check; mirrors the Order Service value bands."""
     if amount >= HIGH_RISK_THRESHOLD:
         return "high"
     if amount >= MEDIUM_RISK_THRESHOLD:

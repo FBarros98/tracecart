@@ -9,7 +9,6 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 class Settings(BaseSettings):
-    """Configuration loaded exclusively from environment variables."""
 
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
 

@@ -1,5 +1,4 @@
-"""Manual OpenTelemetry helpers (spans and business metrics through the API only; the SDK is
-configured by `opentelemetry-instrument`)."""
+"""Manual spans and business metrics (API only; the SDK is set up by `opentelemetry-instrument`)."""
 
 from decimal import Decimal
 
@@ -11,8 +10,7 @@ from opentelemetry.metrics import CallbackOptions, Observation
 tracer = trace.get_tracer("tracecart.order-service")
 meter = metrics.get_meter("tracecart.order-service")
 
-# Business metrics. `value_band` (low|mid|high) is the dimension that localizes a degradation;
-# `outcome` is approved|declined|timeout (timeout = payment outcome unknown, not a decline).
+# `outcome` is approved|declined|timeout (timeout = outcome unknown, not a decline).
 orders_created = meter.create_counter(
     "tracecart.orders.created", unit="{order}", description="Orders created, by value band."
 )
@@ -30,7 +28,6 @@ HIGH_VALUE_THRESHOLD = Decimal("1000.00")
 
 
 def value_band(amount: Decimal) -> str:
-    """Bucket an order total into a low-cardinality band for span attributes."""
     if amount >= HIGH_VALUE_THRESHOLD:
         return "high"
     if amount >= MID_VALUE_THRESHOLD:
@@ -38,10 +35,8 @@ def value_band(amount: Decimal) -> str:
     return "low"
 
 
-# `tracecart.orders.awaiting_payment_result`: orders in PAYMENT_PROCESSING for longer than STUCK_AFTER_SECONDS (outcome still
-# unknown, waiting for reconciliation). The gauge callback runs on the SDK's metric reader thread
-# and must not touch the event loop, so a background task (services/stuck_orders.py) samples the
-# database and stores the counts here.
+# Gauge `tracecart.orders.awaiting_payment_result`. Its callback runs on the SDK's reader thread,
+# so services/stuck_orders.py samples the database and stores the counts here.
 STUCK_AFTER_SECONDS = 30
 STUCK_SAMPLE_INTERVAL_SECONDS = 15
 VALUE_BANDS = ("low", "mid", "high")
@@ -50,7 +45,6 @@ _stuck_orders: dict[str, int] = dict.fromkeys(VALUE_BANDS, 0)
 
 
 def set_stuck_orders(counts: dict[str, int]) -> None:
-    # Every band is always reported, so the gauge goes back to 0 once the orders are reconciled.
     for band in VALUE_BANDS:
         _stuck_orders[band] = counts.get(band, 0)
 

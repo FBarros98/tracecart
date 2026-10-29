@@ -17,6 +17,5 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-        # Uvicorn logs the full traceback afterwards; the client never sees internal details.
         logger.error("Unhandled %s on %s %s", type(exc).__name__, request.method, request.url.path)
         return JSONResponse(status_code=500, content={"detail": "Internal server error"})

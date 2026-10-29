@@ -28,7 +28,6 @@ class CustomerService:
                 customer = Customer(name=data.name, email=data.email, cpf=data.cpf)
                 self.customers.add(customer)
         except IntegrityError as exc:
-            # A concurrent request inserted the same email/CPF between the check and the commit.
             raise ConflictError("A customer with this email or CPF already exists") from exc
         # Intencional: o CPF (sintético) vai em claro no log para que o Cribl o mascare na pipeline.
         logger.info("Customer created: customer_id=%s cpf=%s", customer.id, customer.cpf)

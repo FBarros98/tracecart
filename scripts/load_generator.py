@@ -3,17 +3,15 @@
 Each "request" is one shopping journey made of several HTTP calls:
     GET /products -> POST /orders -> POST /orders/{id}/pay (or /cancel) -> GET /orders/{id}
 
-When the payment outcome is unknown (HTTP 502/504 or 202), the journey retries the payment once to
-exercise reconciliation.
+If the payment outcome is unknown (502/504/202), the journey retries it once.
 
 Usage:
     python scripts/load_generator.py --requests 1000 --concurrency 10 [--interval 0.0]
         [--base-url http://localhost:8000] [--cancel-rate 0.1]
     python scripts/load_generator.py --continuous [--concurrency 3] [--interval 2.0]
 
---continuous keeps generating journeys until Ctrl+C (a steady baseline for the observability
-backend). Stock is finite, so every RESTOCK_INTERVAL_SECONDS the generator creates a new version
-("<name> #2", "#3", ...) of any product whose total stock is running out, keeping price and category.
+--continuous runs until Ctrl+C. Since stock is finite, every RESTOCK_INTERVAL_SECONDS it creates a
+new version ("<name> #2", "#3", ...) of products running low.
 """
 
 import argparse
@@ -28,13 +26,13 @@ from collections import Counter, defaultdict
 import httpx
 
 PAYMENT_METHODS = ("PIX", "CREDIT_CARD", "BOLETO")
-# Public test card numbers (valid Luhn), never real cards.
+# Public test card numbers.
 TEST_CARD_NUMBERS = ("4111111111111111", "5555555555554444", "4242424242424242")
 OUTCOME_UNKNOWN_CODES = {202, 502, 504}
 
-PRODUCTS_PAGE_SIZE = 100  # maximum accepted by GET /products
+PRODUCTS_PAGE_SIZE = 100
 RESTOCK_INTERVAL_SECONDS = 60
-RESTOCK_THRESHOLD = 30  # restock a product when the sum of its versions' stock falls below this
+RESTOCK_THRESHOLD = 30
 RESTOCK_QUANTITY = 300
 PRODUCT_NAME = re.compile(r"^(?P<base>.*?)(?: #(?P<version>\d+))?$")
 
@@ -64,7 +62,7 @@ async def call(
 
 
 async def list_products(client: httpx.AsyncClient, stats: Stats) -> list[dict] | None:
-    """All active products (paginated: restocking makes the catalog grow past one page)."""
+    """All active products, across pages."""
     products: list[dict] = []
     while True:
         response = await call(
@@ -186,7 +184,7 @@ async def run_continuous(
         while True:
             try:
                 await journey(client, stats, customers, args.cancel_rate)
-            except Exception as exc:  # keep the baseline running whatever happens to one journey
+            except Exception as exc:  # one failed journey must not stop the run
                 stats.outcomes[f"journey_error_{type(exc).__name__}"] += 1
             journeys += 1
             await asyncio.sleep(args.interval * random.uniform(0.5, 1.5))

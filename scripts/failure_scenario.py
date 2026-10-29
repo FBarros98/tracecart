@@ -1,13 +1,9 @@
-"""Traffic for the "slow fraud check on high-value orders" failure scenario.
+"""Mixed traffic for the "slow fraud check on high-value orders" failure scenario.
 
-Exercises every Order Service flow (customers, products, orders, payment, cancellation, listings,
-negative probes) plus the Payment Service read endpoints, with orders spread across the three value
-bands (low < 300, mid 300-999.99, high >= 1000). It creates its own customers and products, so no
-seed is needed. With the failure injected, only the high band should time out; this script does not
-know or assume that, it just produces the mixed traffic and reports what happened per band.
-
-By default it does NOT retry payments that ended unknown (502/504), so orders pile up in
-PAYMENT_PROCESSING; use --reconcile-after to retry them like a real client would.
+Covers every Order Service flow plus the Payment Service read endpoints, with orders spread across
+the value bands (low < 300, mid 300-999.99, high >= 1000), and reports the outcome per band.
+Creates its own customers and products. Payments that end unknown (502/504) are not retried unless
+--reconcile-after is given.
 
 Usage:
     python scripts/failure_scenario.py [--duration 300] [--concurrency 4] [--interval 1.0]
@@ -29,15 +25,15 @@ import httpx
 
 PAYMENT_METHODS = ("PIX", "CREDIT_CARD", "BOLETO")
 CATEGORIES = ("ELECTRONICS", "BOOKS", "CLOTHING", "HOME", "FOOD")
-# Public test card numbers (valid Luhn), never real cards.
+# Public test card numbers.
 TEST_CARD_NUMBERS = ("4111111111111111", "5555555555554444", "4242424242424242")
 OUTCOME_UNKNOWN_CODES = {202, 502, 504}
 
-MID_VALUE_THRESHOLD = Decimal("300.00")  # same bands as order-service core/telemetry.py
+MID_VALUE_THRESHOLD = Decimal("300.00")  # same as order-service core/telemetry.py
 HIGH_VALUE_THRESHOLD = Decimal("1000.00")
 BANDS = ("low", "mid", "high")
 
-# Starting catalog: (label, category, price). Cheap items fill the low band, expensive ones reach high.
+# (label, category, price)
 BASE_PRODUCTS = [
     ("Cabo USB", "ELECTRONICS", "39.90"),
     ("Camiseta", "CLOTHING", "59.90"),
@@ -84,7 +80,6 @@ class Stats:
         self.calls: Counter[tuple[str, int | str]] = Counter()
         self.latencies: defaultdict[str, list[float]] = defaultdict(list)
         self.outcomes: Counter[str] = Counter()
-        # per band: payment attempts by result, and latency of the pay call
         self.band_results: defaultdict[str, Counter[str]] = defaultdict(Counter)
         self.band_pay_ms: defaultdict[str, list[float]] = defaultdict(list)
         self.band_orders: Counter[str] = Counter()
@@ -96,7 +91,6 @@ class Stats:
 
 
 class Catalog:
-    """Customers and products created (or found) during the run."""
 
     def __init__(self) -> None:
         self.customers: list[str] = []
@@ -157,7 +151,6 @@ def build_items(catalog: Catalog, target: str) -> tuple[list[dict], Decimal] | N
 
 
 async def probe_reads(client: httpx.AsyncClient, stats: Stats, catalog: Catalog) -> None:
-    """Listings and filters, and negative cases."""
     roll = random.random()
     if roll < 0.2:
         await call(client, stats, "list_customers", "GET", "/customers", params={"limit": 20})
@@ -218,7 +211,6 @@ async def journey(
     if random.random() < cancel_rate:
         response = await call(client, stats, "cancel_order", "POST", f"/orders/{order_id}/cancel")
         stats.outcomes["CANCELLED" if response is not None and response.status_code == 200 else "cancel_failed"] += 1
-        # A cancelled order can no longer be paid: expected 409.
         await call(client, stats, "pay_cancelled_order", "POST", f"/orders/{order_id}/pay")
         return
 
@@ -238,7 +230,6 @@ async def journey(
                 stats.unknown_orders.pop(order_id, None)
                 stats.band_results[target]["reconciled"] += 1
     elif code == 200:
-        # Paying again is idempotent (order already paid).
         if random.random() < 0.15:
             await call(client, stats, "pay_order_again", "POST", f"/orders/{order_id}/pay", **pay_kwargs)
         if random.random() < 0.5:
@@ -302,7 +293,7 @@ async def run(args: argparse.Namespace) -> int:
     stats = Stats()
     catalog = Catalog()
     weights = args.weights
-    timeout = httpx.Timeout(30.0)  # longer than the Order Service's payment timeout (5s default)
+    timeout = httpx.Timeout(30.0)  # above the Order Service payment timeout
     limits = httpx.Limits(max_connections=args.concurrency * 3)
     async with (
         httpx.AsyncClient(base_url=args.base_url, timeout=timeout, limits=limits) as client,
@@ -333,7 +324,7 @@ async def run(args: argparse.Namespace) -> int:
             while time.monotonic() < deadline:
                 try:
                     await journey(client, payment_client, stats, catalog, weights, args.cancel_rate, args.reconcile_after)
-                except Exception as exc:  # keep the traffic going whatever happens to one journey
+                except Exception as exc:  # one failed journey must not stop the run
                     stats.outcomes[f"journey_error_{type(exc).__name__}"] += 1
                 journeys += 1
                 await asyncio.sleep(args.interval * random.uniform(0.5, 1.5))

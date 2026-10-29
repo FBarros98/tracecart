@@ -8,7 +8,7 @@ Collector: toda a telemetria (traces, métricas e logs) vai ao Cribl self-hosted
 Compose); o roteamento dentro do Cribl é configurado na UI dele, fora deste repositório. Há
 métricas de negócio no Order Service e spans de negócio manuais (ver "Decisões arquiteturais");
 `infrastructure/datadog/` guarda o dashboard e o monitor em JSON, para importar manualmente no
-Datadog. Kubernetes fica para etapas futuras e **não** está implementado aqui.
+Datadog.
 
 ## Arquitetura
 
@@ -263,7 +263,7 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
   Reenvio com valor ou método diferente recebe 409.
 - **Timeout ≠ recusa.** Erros de comunicação viram 502/504 com o pedido em `PAYMENT_PROCESSING`;
   só `DECLINED` explícito leva a `PAYMENT_FAILED`.
-- **Pronto para várias réplicas e para Kubernetes.** Não há estado em memória: tudo crítico está no
+- **Pronto para várias réplicas.** Não há estado em memória: tudo crítico está no
   PostgreSQL. As migrações usam advisory lock, então réplicas podem subir juntas. Configuração e
   URLs vêm de variáveis de ambiente (sem IPs fixos nem segredos no código), os health checks são
   separados em liveness e readiness, e o Uvicorn roda como PID 1, encerrando de forma graciosa

@@ -1,7 +1,6 @@
 """Populate TraceCart with demo customers and products through the public REST API.
 
-Idempotent: customers are unique by email/CPF and products by name, so the API answers 409 for
-records that already exist and the script simply skips them.
+Idempotent: existing records answer 409 and are skipped.
 
 Usage:
     python scripts/seed.py [--base-url http://localhost:8000]
@@ -13,7 +12,7 @@ import sys
 
 import httpx
 
-# Fictitious people. CPFs are generated synthetically (valid check digits, deterministic seed).
+# CPFs are synthetic.
 CUSTOMERS = [
     ("Ana Beatriz Moreira", "ana.moreira@example.com"),
     ("Bruno Henrique Lima", "bruno.lima@example.com"),
@@ -81,7 +80,7 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://localhost:8000", help="Order Service base URL")
     args = parser.parse_args()
 
-    rng = random.Random(20261018)  # deterministic: re-runs produce the same CPFs
+    rng = random.Random(20261018)
     results: dict[str, int] = {"created": 0, "existing": 0, "failed": 0}
 
     try:

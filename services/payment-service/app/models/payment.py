@@ -14,7 +14,6 @@ class Payment(Base):
     __table_args__ = (CheckConstraint("amount > 0", name="ck_payments_amount_positive"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    # One payment per order: the unique order_id is the idempotency key.
     order_id: Mapped[uuid.UUID] = mapped_column(unique=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     method: Mapped[PaymentMethod] = mapped_column(Enum(PaymentMethod, native_enum=False, length=20))

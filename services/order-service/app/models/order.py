@@ -34,7 +34,6 @@ class Order(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    # Items are always needed together with the order, so they are eagerly loaded.
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", lazy="selectin", cascade="all, delete-orphan"
     )

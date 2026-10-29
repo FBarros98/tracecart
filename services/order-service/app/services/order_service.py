@@ -1,13 +1,10 @@
 """Order lifecycle rules.
 
-Stock strategy: stock is reserved (decremented) when the order is created and is held while the
-order is PENDING, PAYMENT_PROCESSING or PAID. It is released exactly once, on the transition to
-PAYMENT_FAILED (declined) or to CANCELLED from PENDING. Because releases are tied to state
-transitions done under a row lock, stock can never be released or decremented twice.
+Stock is reserved on creation and released exactly once, on PAYMENT_FAILED or on CANCELLED from
+PENDING; transitions run under a row lock, so it is never released or decremented twice.
 
-Payments: the Order Service never holds a database transaction while calling the Payment Service.
-If the call times out or fails, the order stays in PAYMENT_PROCESSING (outcome unknown) and a new
-POST /orders/{id}/pay reconciles it by querying the Payment Service by order_id.
+No database transaction is held while calling the Payment Service. On timeout/failure the order
+stays in PAYMENT_PROCESSING and a new POST /orders/{id}/pay reconciles it by order_id.
 """
 
 import logging
@@ -64,7 +61,7 @@ class OrderService:
             if await self.customers.get(data.customer_id) is None:
                 raise BusinessRuleError(f"Customer {data.customer_id} not found")
 
-            # Row locks serialize concurrent purchases of the same products: no overselling.
+            # row locks prevent overselling
             products = await self.products.lock_many(quantities)
             missing = [str(product_id) for product_id in quantities if product_id not in products]
             if missing:
@@ -127,7 +124,6 @@ class OrderService:
             try:
                 payment = await self._request_payment(order, reconciling, card_number)
             except PaymentServiceError as exc:
-                # Timeout/502: the payment outcome is unknown, not a decline.
                 span.set_attribute("payment.outcome", "timeout")
                 orders_payments.add(1, {"value_band": band, "outcome": "timeout"})
                 logger.warning(
@@ -179,7 +175,7 @@ class OrderService:
                 return existing
         # The Payment Service is idempotent by order_id, so retrying the POST is safe.
         logger.info("Requesting payment: order_id=%s amount=%s", order.id, order.total_amount)
-        # The card number is never persisted: it is only forwarded, and only for card payments.
+        # the card number is only forwarded, never persisted
         card = card_number if order.payment_method == PaymentMethod.CREDIT_CARD else None
         return await self.payment_client.create_payment(order.id, order.total_amount, order.payment_method, card)
 
@@ -187,7 +183,6 @@ class OrderService:
         async with self.session.begin():
             order = await self._get_for_update(order_id)
             if order.status != OrderStatus.PAYMENT_PROCESSING:
-                # A concurrent request already applied the result.
                 return order
             if payment.status == PaymentStatus.APPROVED:
                 order.status = OrderStatus.PAID

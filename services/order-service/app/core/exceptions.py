@@ -1,5 +1,4 @@
 class AppError(Exception):
-    """Base class for errors that map to a safe HTTP response."""
 
     status_code: int = 500
 

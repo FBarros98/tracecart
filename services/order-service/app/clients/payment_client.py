@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class PaymentClient:
-    """HTTP client for the Payment Service. Timeouts are configured on the shared httpx client."""
+    """HTTP client for the Payment Service."""
 
     def __init__(self, http_client: httpx.AsyncClient) -> None:
         self._http = http_client
