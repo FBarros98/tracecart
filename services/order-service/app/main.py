@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from app.core.config import get_settings
 from app.core.error_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.database.session import engine
+from app.services.stuck_orders import run_stuck_orders_sampler
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -29,10 +31,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         base_url=settings.payment_service_url,
         timeout=httpx.Timeout(settings.payment_service_timeout_seconds),
     )
+    stuck_orders_task = asyncio.create_task(run_stuck_orders_sampler())
     try:
         yield
     finally:
         logger.info("Shutting down %s", settings.service_name)
+        stuck_orders_task.cancel()
+        await asyncio.gather(stuck_orders_task, return_exceptions=True)
         await app.state.payment_http_client.aclose()
         await engine.dispose()
         logger.info("Shutdown complete")

@@ -1,5 +1,7 @@
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +25,13 @@ class OrderRepository:
             .execution_options(populate_existing=True)
         )
         return await self.session.scalar(statement)
+
+    async def stuck_amounts(self, older_than: datetime) -> Sequence[Decimal]:
+        """Totals of orders waiting for a payment outcome since before `older_than`."""
+        statement = select(Order.total_amount).where(
+            Order.status == OrderStatus.PAYMENT_PROCESSING, Order.updated_at < older_than
+        )
+        return (await self.session.scalars(statement)).all()
 
     async def list(
         self,

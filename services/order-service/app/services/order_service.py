@@ -24,7 +24,7 @@ from app.core.exceptions import (
     NotFoundError,
     PaymentServiceError,
 )
-from app.core.telemetry import tracer, value_band
+from app.core.telemetry import orders_created, orders_payments, orders_revenue, tracer, value_band
 from app.models import Order, OrderItem
 from app.models.enums import OrderStatus, PaymentMethod
 from app.repositories.customer_repository import CustomerRepository
@@ -94,6 +94,7 @@ class OrderService:
             )
             self.orders.add(order)
 
+        orders_created.add(1, {"value_band": value_band(order.total_amount)})
         logger.info(
             "Order created: order_id=%s customer_id=%s items=%d total_amount=%s payment_method=%s",
             order.id,
@@ -112,7 +113,8 @@ class OrderService:
             async with self.session.begin():
                 order = await self._get_for_update(order_id)
                 span.set_attribute("order.amount", float(order.total_amount))
-                span.set_attribute("order.value_band", value_band(order.total_amount))
+                band = value_band(order.total_amount)
+                span.set_attribute("order.value_band", band)
                 if order.status == OrderStatus.CANCELLED:
                     raise ConflictError("Cancelled orders cannot be paid")
                 if order.status == OrderStatus.PAID:
@@ -127,6 +129,7 @@ class OrderService:
             except PaymentServiceError as exc:
                 # Timeout/502: the payment outcome is unknown, not a decline.
                 span.set_attribute("payment.outcome", "timeout")
+                orders_payments.add(1, {"value_band": band, "outcome": "timeout"})
                 logger.warning(
                     "Payment outcome unknown for order_id=%s; order kept in PAYMENT_PROCESSING: %s",
                     order_id,
@@ -137,7 +140,11 @@ class OrderService:
                     f"PAYMENT_PROCESSING. Retry POST /orders/{order_id}/pay to reconcile."
                 ) from exc
 
-            span.set_attribute("payment.outcome", payment.status.value.lower())
+            outcome = payment.status.value.lower()
+            span.set_attribute("payment.outcome", outcome)
+            orders_payments.add(1, {"value_band": band, "outcome": outcome})
+            if payment.status == PaymentStatus.APPROVED:
+                orders_revenue.add(float(order.total_amount), {"value_band": band})
             return await self._apply_payment_result(order_id, payment), payment
 
     async def cancel(self, order_id: uuid.UUID) -> Order:
