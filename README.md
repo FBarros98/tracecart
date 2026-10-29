@@ -5,8 +5,10 @@ observabilidade. Esta é a **Etapa 1**: aplicação, persistência, comunicaçã
 e infraestrutura local com Docker Compose. Os serviços já têm instrumentação
 automática do OpenTelemetry (traces, métricas HTTP e logs), enviada por um OpenTelemetry
 Collector: toda a telemetria (traces, métricas e logs) vai ao Cribl self-hosted (container do
-Compose); o roteamento dentro do Cribl é configurado na UI dele, fora deste repositório. Métricas de negócio, dashboards e
-Kubernetes ficam para etapas futuras e **não** estão implementados aqui.
+Compose); o roteamento dentro do Cribl é configurado na UI dele, fora deste repositório. Há
+métricas de negócio no Order Service e spans de negócio manuais (ver "Decisões arquiteturais");
+`infrastructure/datadog/` guarda o dashboard e o monitor em JSON, para importar manualmente no
+Datadog. Kubernetes fica para etapas futuras e **não** está implementado aqui.
 
 ## Arquitetura
 
@@ -55,36 +57,44 @@ tracecart/
 │   └── payment-service/           # mesma organização (sem clients/)
 ├── infrastructure/postgres/init/01-create-databases.sql   # cria roles e bancos no 1º start
 ├── infrastructure/otel-collector/config.yaml              # OTel Collector: traces/métricas/logs → Cribl
+├── infrastructure/datadog/                                # dashboard e monitor (JSON, importação manual)
 ├── scripts/
 │   ├── seed.py                    # dados de demonstração
 │   ├── load_generator.py          # gerador de tráfego
+│   ├── failure_scenario.py        # tráfego do cenário de antifraude lenta
+│   ├── sensitive_data_flow.sh     # fluxo único que gera logs com CPF e cartão
 │   └── requirements.txt           # httpx (dependência dos scripts)
 ├── compose.yaml
-├── .env.example
 └── README.md
 ```
 
 ## Pré-requisitos
 
 - Docker com Docker Compose v2 (`docker compose version`)
-- Python 3.12+ no host, apenas para rodar os scripts `seed.py` e `load_generator.py`
+- Python 3.13 no host, apenas para rodar os scripts `seed.py`, `load_generator.py` e `failure_scenario.py`
+  (`sensitive_data_flow.sh` precisa de Bash e curl)
 - Portas 8000 e 8001 livres
 
 ## Configuração (.env)
 
+Crie um `.env` na raiz (não versionado) com as três senhas, que são obrigatórias:
+
 ```bash
-cp .env.example .env          # PowerShell: Copy-Item .env.example .env
+POSTGRES_PASSWORD=<senha>
+ORDER_DB_PASSWORD=<senha>
+PAYMENT_DB_PASSWORD=<senha>
 ```
 
-O `.env` é lido pelo Docker Compose e repassado aos containers; os serviços carregam e validam tudo
-via `pydantic-settings` (por exemplo, taxas fora de `[0, 1]` impedem o serviço de iniciar). As senhas
-do `.env.example` são placeholders locais. Troque-as à vontade, **antes** do primeiro `up`, porque o
-script de init do Postgres só roda com o volume vazio.
+Todas as demais variáveis da tabela abaixo têm default no `compose.yaml`; defina-as no `.env` só
+para sobrescrever. O `.env` é lido pelo Docker Compose e repassado aos containers; os serviços
+carregam e validam tudo via `pydantic-settings` (por exemplo, `FRAUD_CHECK_DELAY_SECONDS` não
+positivo impede o serviço de iniciar). Use senhas locais e defina-as **antes** do primeiro `up`,
+porque o script de init do Postgres só roda com o volume vazio.
 
 | Grupo | Variáveis |
 |---|---|
 | Ambiente / logs | `ENVIRONMENT`, `LOG_LEVEL` (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
-| Banco | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `ORDER_DB_USER`, `ORDER_DB_PASSWORD`, `PAYMENT_DB_USER`, `PAYMENT_DB_PASSWORD` |
+| Banco | `POSTGRES_USER`, `POSTGRES_PASSWORD` (obrigatória), `ORDER_DB_USER`, `ORDER_DB_PASSWORD` (obrigatória), `PAYMENT_DB_USER`, `PAYMENT_DB_PASSWORD` (obrigatória) |
 | Portas no host | `ORDER_SERVICE_PORT` (8000), `PAYMENT_SERVICE_PORT` (8001) |
 | Falha injetável | `FRAUD_CHECK_DELAY_ENABLED` (false), `FRAUD_CHECK_DELAY_SECONDS` (8): quando ligada, a verificação antifraude (span `payment.fraud_check`) espera esse tempo só para pagamentos de risco `high` (valor ≥ R$ 1.000). Acima de `PAYMENT_SERVICE_TIMEOUT_SECONDS`, o Order Service estoura o timeout e o pedido fica em `PAYMENT_PROCESSING`, enquanto o Payment Service conclui o pagamento |
 | Comunicação | `PAYMENT_SERVICE_URL` (`http://tracecart-payment-service:8000`), `PAYMENT_SERVICE_TIMEOUT_SECONDS` (5) |
@@ -110,9 +120,9 @@ Não há passos manuais: o Postgres cria roles e bancos no primeiro start, e cad
 | Order Service | |
 |---|---|
 | `POST /customers`, `GET /customers`, `GET /customers/{id}` | clientes (`GET /customers` lista; usado pelo gerador de tráfego) |
-| `POST /products`, `GET /products`, `GET /products/{id}` | produtos e estoque (`?category=BOOKS&active_only=true`) |
+| `POST /products`, `GET /products`, `GET /products/{id}` | produtos e estoque (`?category=BOOKS&active_only=true&limit=50&offset=0`; `limit` 1-100, padrão 50) |
 | `POST /orders`, `GET /orders`, `GET /orders/{id}` | pedidos (`?status=PAID&customer_id=...`) |
-| `POST /orders/{id}/pay`, `POST /orders/{id}/cancel` | pagamento/reconciliação (corpo opcional `{"card_number": "4111 1111 1111 1111"}`, usado só em `CREDIT_CARD`) e cancelamento |
+| `POST /orders/{id}/pay`, `POST /orders/{id}/cancel` | pagamento/reconciliação (corpo opcional `{"card_number": "4111 1111 1111 1111"}`, usado só em `CREDIT_CARD`) e cancelamento. `pay` responde 202 se o pedido segue em `PAYMENT_PROCESSING`, e 502/504 se o resultado é desconhecido |
 
 | Payment Service | |
 |---|---|
@@ -176,6 +186,25 @@ python scripts/load_generator.py --continuous --concurrency 3 --interval 3
 Roda até `Ctrl+C` (o resumo sai ao parar). Como o estoque é finito, a cada 60 s o gerador cria uma
 nova versão (`<nome> #2`, `#3`, ...) de qualquer produto cujo estoque somado caiu abaixo de 30,
 com o mesmo preço e categoria; o catálogo cresce com o tempo e `GET /products` é paginado.
+
+### Cenário de falha (antifraude lenta)
+
+```bash
+python scripts/failure_scenario.py --duration 300 --concurrency 4 --mix low=50,mid=30,high=20
+```
+
+Gera tráfego misto nas três faixas de valor (`low` < R$ 300, `mid` até R$ 999,99, `high` ≥ R$ 1.000)
+e cria os próprios clientes e produtos (não precisa de seed). Com `FRAUD_CHECK_DELAY_ENABLED=true`
+(e `FRAUD_CHECK_DELAY_SECONDS` acima de `PAYMENT_SERVICE_TIMEOUT_SECONDS`), só a faixa `high` estoura
+o timeout. Por padrão não reconcilia pagamentos desconhecidos (502/504), então os pedidos se
+acumulam em `PAYMENT_PROCESSING`; `--reconcile-after SEGUNDOS` reenvia o pagamento como um cliente
+real faria. Outras opções: `--cancel-rate`, `--settle`, `--base-url`, `--payment-url`.
+
+### Fluxo com dados sensíveis
+
+`bash scripts/sensitive_data_flow.sh [CARTAO]` cria um cliente (CPF sintético novo a cada execução),
+um produto e um pedido `CREDIT_CARD`, e o paga, gerando os logs com CPF e cartão em claro que a
+pipeline do Cribl deve mascarar. Usa `ORDER_URL` (padrão `http://localhost:8000`).
 
 ## Reconciliação de pagamentos
 
@@ -255,8 +284,18 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
   SQL, logs). Os spans de negócio são criados manualmente só pela **API** do OpenTelemetry
   (`from opentelemetry import trace`, em `core/telemetry.py` de cada serviço); o SDK e o exporter
   continuam sendo configurados pelo `opentelemetry-instrument`, nunca no código. Spans manuais:
-  `order.pay` (Order Service) e `payment.fraud_check` (Payment Service); herdam o contexto do
-  span automático da requisição, então ficam no mesmo trace.
+  `order.pay` (Order Service; atributos `order.id`, `order.amount`, `order.value_band`,
+  `payment.outcome`) e `payment.fraud_check` (Payment Service; `order.id`, `payment.id`,
+  `payment.amount`, `fraud.risk_level` e, quando a falha está ligada, `fraud.delay_seconds`);
+  herdam o contexto do span automático da requisição, então ficam no mesmo trace. A faixa de valor
+  (`value_band`/`risk_level`) é `low` (< R$ 300), `mid`/`medium` (≥ R$ 300) ou `high` (≥ R$ 1.000).
+- **Métricas de negócio (só no Order Service).** Também pela API (`core/telemetry.py`), sempre com
+  o atributo `value_band`: `tracecart.orders.created` (counter), `tracecart.payments.attempts`
+  (counter, com `outcome` = `approved`, `declined` ou `timeout`; timeout é resultado desconhecido,
+  não recusa), `tracecart.payments.approved_amount` (counter, BRL) e o gauge
+  `tracecart.orders.awaiting_payment_result` (pedidos em `PAYMENT_PROCESSING` há mais de 30 s). O
+  gauge é alimentado por uma tarefa em segundo plano (`services/stuck_orders.py`) que consulta o
+  banco a cada 15 s, pois o callback do SDK não pode tocar o event loop.
 - **OpenTelemetry por instrumentação automática.** O Uvicorn roda sob `opentelemetry-instrument`
   (o Alembic não), configurado só por variáveis `OTEL_*`.
   FastAPI, HTTPX e SQLAlchemy geram os spans e o HTTPX propaga o `traceparent` (W3C), então o

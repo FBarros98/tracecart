@@ -45,7 +45,7 @@ services:
       tracecart.environment: ${ENVIRONMENT:-local}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (cp .env.example .env)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see README, "Configuração (.env)")}
       POSTGRES_DB: postgres
       ORDER_DB_USER: ${ORDER_DB_USER:-tracecart_order}
       ORDER_DB_PASSWORD: ${ORDER_DB_PASSWORD:?Set ORDER_DB_PASSWORD in .env}
