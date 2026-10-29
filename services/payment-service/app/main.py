@@ -9,7 +9,6 @@ from app.core.config import get_settings
 from app.core.error_handlers import register_exception_handlers
 from app.core.logging import configure_logging
 from app.database.session import engine
-from app.services.fault_injector import FaultInjector
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -19,7 +18,6 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting %s (environment=%s)", settings.service_name, settings.environment)
-    FaultInjector(settings).log_configuration()
     try:
         yield
     finally:
@@ -30,7 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="TraceCart Payment Service",
-    description="Simulated payment processing for TraceCart, with controlled fault injection.",
+    description="Simulated payment processing for TraceCart.",
     version="1.0.0",
     lifespan=lifespan,
 )

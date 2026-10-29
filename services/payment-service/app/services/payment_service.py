@@ -1,7 +1,7 @@
 """Payment processing.
 
 Idempotency: order_id is unique, so at most one payment exists per order. Processing happens in two
-short transactions with the simulated work in between (no transaction is held during latency):
+short transactions:
 
 1. register: insert the payment as PROCESSING (or load the existing one). A finalized payment
    (APPROVED/DECLINED) is returned as is. A PROCESSING/ERROR payment is (re)processed.
@@ -18,20 +18,19 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError, SimulatedUnexpectedError
+from app.core.exceptions import ConflictError, NotFoundError
+from app.core.telemetry import risk_level, tracer
 from app.models import Payment
 from app.models.enums import FINAL_PAYMENT_STATUSES, PaymentStatus
 from app.repositories.payment_repository import PaymentRepository
 from app.schemas.payment import PaymentCreate
-from app.services.fault_injector import FaultInjector
 
 logger = logging.getLogger(__name__)
 
 
 class PaymentService:
-    def __init__(self, session: AsyncSession, faults: FaultInjector) -> None:
+    def __init__(self, session: AsyncSession) -> None:
         self.session = session
-        self.faults = faults
         self.payments = PaymentRepository(session)
 
     async def get(self, payment_id: uuid.UUID) -> Payment:
@@ -59,17 +58,8 @@ class PaymentService:
             )
             return payment, False
 
-        await self.faults.apply_latency()
-
-        try:
-            self.faults.maybe_raise_unexpected_error()
-        except SimulatedUnexpectedError:
-            await self._finalize(payment.id, PaymentStatus.ERROR, "UNEXPECTED_ERROR", started)
-            raise
-
-        decline_reason = self.faults.decline_reason()
-        status = PaymentStatus.DECLINED if decline_reason else PaymentStatus.APPROVED
-        payment = await self._finalize(payment.id, status, decline_reason, started, inject_db_failure=True)
+        await self._fraud_check(payment)
+        payment = await self._finalize(payment.id, PaymentStatus.APPROVED, None, started)
         # Intencional: o cartão (sintético) vai em claro no log para que o Cribl o mascare na pipeline.
         logger.info(
             "Payment processed: payment_id=%s order_id=%s method=%s card_number=%s amount=%s status=%s "
@@ -85,9 +75,19 @@ class PaymentService:
         )
         return payment, created
 
+    async def _fraud_check(self, payment: Payment) -> None:
+        with tracer.start_as_current_span("payment.fraud_check") as span:
+            level = risk_level(payment.amount)
+            span.set_attribute("order.id", str(payment.order_id))
+            span.set_attribute("payment.id", str(payment.id))
+            span.set_attribute("payment.amount", float(payment.amount))
+            span.set_attribute("fraud.risk_level", level)
+            logger.info(
+                "Fraud check: payment_id=%s order_id=%s risk_level=%s", payment.id, payment.order_id, level
+            )
+
     async def _register(self, data: PaymentCreate) -> tuple[Payment, bool]:
         async with self.session.begin():
-            self.faults.maybe_fail_database("register payment")
             created = await self.payments.insert_if_absent(data.order_id, data.amount, data.method)
             payment = await self.payments.get_by_order(data.order_id, for_update=True)
             if payment is None:  # pragma: no cover - the row was inserted or already existed
@@ -116,14 +116,10 @@ class PaymentService:
         status: PaymentStatus,
         failure_reason: str | None,
         started: float,
-        inject_db_failure: bool = False,
     ) -> Payment:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         async with self.session.begin():
             payment = await self.payments.finalize(payment_id, status, failure_reason, elapsed_ms)
-            if inject_db_failure:
-                # Raised after the UPDATE and before COMMIT: the transaction is rolled back.
-                self.faults.maybe_fail_database("finalize payment")
             if payment is None:
                 # Another request finalized this payment first; return the stored outcome.
                 payment = await self.payments.get(payment_id)

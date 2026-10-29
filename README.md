@@ -1,8 +1,8 @@
 # TraceCart
 
 Mini e-commerce de pedidos, 100% backend (APIs REST), feito para servir de base a exercícios de
-observabilidade. Esta é a **Etapa 1**: aplicação, persistência, comunicação entre microsserviços,
-injeção de falhas e infraestrutura local com Docker Compose. Os serviços já têm instrumentação
+observabilidade. Esta é a **Etapa 1**: aplicação, persistência, comunicação entre microsserviços
+e infraestrutura local com Docker Compose. Os serviços já têm instrumentação
 automática do OpenTelemetry (traces, métricas HTTP e logs), enviada por um OpenTelemetry
 Collector: toda a telemetria (traces, métricas e logs) vai ao Cribl self-hosted (container do
 Compose); o roteamento dentro do Cribl é configurado na UI dele, fora deste repositório. Métricas de negócio, dashboards e
@@ -24,7 +24,7 @@ Client ──HTTP──▶ tracecart-order-service ──HTTP──▶ tracecart
 | Serviço | Responsabilidade | Porta interna / host |
 |---|---|---|
 | `tracecart-order-service` | Clientes, produtos, estoque, pedidos e estados; solicita pagamentos e reconcilia resultados | 8000 / 8000 |
-| `tracecart-payment-service` | Recebe, simula e persiste pagamentos (aprova/recusa), com idempotência e injeção de falhas | 8000 / 8001 |
+| `tracecart-payment-service` | Recebe, simula e persiste pagamentos com idempotência por pedido | 8000 / 8001 |
 | `tracecart-postgres` | Uma instância PostgreSQL 16 com dois bancos isolados | 5432 / não publicada |
 
 Cada serviço acessa **apenas o próprio banco**: cada banco tem um role dono dedicado e o `CONNECT` é
@@ -52,7 +52,7 @@ tracecart/
 │   │   ├── alembic/ + alembic.ini # migrações
 │   │   ├── requirements.txt
 │   │   └── Dockerfile
-│   └── payment-service/           # mesma organização (sem clients/); services/fault_injector.py
+│   └── payment-service/           # mesma organização (sem clients/)
 ├── infrastructure/postgres/init/01-create-databases.sql   # cria roles e bancos no 1º start
 ├── infrastructure/otel-collector/config.yaml              # OTel Collector: traces/métricas/logs → Cribl
 ├── scripts/
@@ -89,7 +89,6 @@ script de init do Postgres só roda com o volume vazio.
 | Comunicação | `PAYMENT_SERVICE_URL` (`http://tracecart-payment-service:8000`), `PAYMENT_SERVICE_TIMEOUT_SECONDS` (5) |
 | OpenTelemetry | `OTEL_SDK_DISABLED` (false), `OTEL_TRACES_EXPORTER` (otlp), `OTEL_METRICS_EXPORTER` (otlp), `OTEL_LOGS_EXPORTER` (otlp), `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://tracecart-otel-collector:4317`), `OTEL_EXPORTER_OTLP_PROTOCOL` (grpc), `ORDER_SERVICE_VERSION` / `PAYMENT_SERVICE_VERSION` (1.0.0, viram `service.version`). Lidas pelo SDK do OTel, não pelo `pydantic-settings`; as demais `OTEL_*` (nome do serviço, amostragem, exclusões) são fixas no `compose.yaml` |
 | Cribl self-hosted | `CRIBL_VERSION` (`4.20.4`, tag da imagem `cribl/cribl`; sempre fixa), `CRIBL_UI_PORT` (`9000`, porta da UI no host), `CRIBL_OTLP_ENDPOINT` (`tracecart-cribl:4317`, Source OpenTelemetry com OTLP version 1.3.1, protocolo gRPC, sem TLS), `CRIBL_AUTH_TOKEN` (opcional; token do Source, enviado como `authorization: Bearer <token>`) |
-| Falhas | ver [Cenários de falha](#cenários-de-falha) |
 
 ## Executar com Docker Compose
 
@@ -166,24 +165,7 @@ Cada *request* é uma jornada de compra com várias chamadas: `GET /products` �
 reconciliar uma vez. No fim, o script mostra um resumo com contagem por status HTTP, latências
 média/p95/máx por operação e o status final dos pedidos. Requer o seed (usa os clientes existentes).
 
-## Cenários de falha
-
-Todas as falhas ficam no Payment Service, vêm **desabilitadas** por padrão, são independentes entre
-si e usam taxas entre 0 e 1. Para ativar, edite o `.env` e recrie o serviço:
-
-```bash
-# ex.: no .env -> PAYMENT_DECLINE_ENABLED=true e PAYMENT_DECLINE_RATE=0.3
-docker compose up -d tracecart-payment-service
-docker compose logs tracecart-payment-service | grep "Fault injection"   # confirma a configuração ativa
-```
-
-| Cenário | Variáveis | Efeito observável |
-|---|---|---|
-| Pagamento recusado | `PAYMENT_DECLINE_ENABLED`, `PAYMENT_DECLINE_RATE` | Pagamento `DECLINED` com `failure_reason`; pedido `PAYMENT_FAILED` e estoque liberado |
-| Latência artificial | `PAYMENT_LATENCY_ENABLED`, `PAYMENT_LATENCY_MIN_MS`, `PAYMENT_LATENCY_MAX_MS` | `asyncio.sleep` antes de finalizar. Acima de `PAYMENT_SERVICE_TIMEOUT_SECONDS` (ex.: 6000–8000 ms) provoca timeout |
-| Falha intermitente de banco | `DATABASE_FAILURE_ENABLED`, `DATABASE_FAILURE_RATE` | Payment responde 503; a transação sofre rollback, nada é apagado ou corrompido |
-| Timeout HTTP | `PAYMENT_SERVICE_TIMEOUT_SECONDS` (Order Service) | `POST /orders/{id}/pay` responde **504**; o pedido fica em `PAYMENT_PROCESSING` |
-| Erro inesperado | `UNEXPECTED_ERROR_ENABLED`, `UNEXPECTED_ERROR_RATE` | Payment responde 500 `{"detail":"Internal server error"}`, sem stack trace; pagamento fica `ERROR` |
+## Reconciliação de pagamentos
 
 Quando o Payment Service falha ou estoura o timeout, o Order Service responde 502/504 e **não**
 assume recusa: o pedido continua em `PAYMENT_PROCESSING`, porque o resultado é desconhecido. Para
@@ -192,21 +174,10 @@ reconciliar, chame `POST /orders/{id}/pay` de novo. O Order Service consulta
 solicitação (que é idempotente). Enquanto o pagamento estiver em andamento, o cancelamento é
 bloqueado (409).
 
-Exemplo de incidente de timeout (Linux, macOS e Git Bash; no PowerShell use `$env:VAR='valor'`). Variáveis de
-ambiente do shell têm precedência sobre o `.env`:
-
-```bash
-PAYMENT_LATENCY_ENABLED=true PAYMENT_LATENCY_MIN_MS=6000 PAYMENT_LATENCY_MAX_MS=8000 \
-  docker compose up -d tracecart-payment-service
-python scripts/load_generator.py --requests 50 --concurrency 5
-docker compose up -d tracecart-payment-service          # volta aos valores do .env
-```
-
 ## Logs
 
 Os serviços usam apenas o módulo `logging` padrão, com saída em stdout e nível definido por
-`LOG_LEVEL`. São registrados início e encerramento, operações de negócio, exceções e cada falha
-simulada (nível WARNING, prefixo `Simulated fault:`).
+`LOG_LEVEL`. São registrados início e encerramento, operações de negócio e exceções.
 
 ```bash
 docker compose logs -f                                   # todos
@@ -268,8 +239,14 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
   ao Payment Service (`card_number` opcional em `POST /payments`) e **nunca é persistido**. O log
   `Payment processed` do Payment Service o emite em claro (`card_number=4111111111111111`, ou `-`
   se ausente), também de propósito, para o Cribl mascarar.
+- **OpenTelemetry com instrumentação mista.** A automática cobre o contexto geral (HTTP, HTTPX,
+  SQL, logs). Os spans de negócio são criados manualmente só pela **API** do OpenTelemetry
+  (`from opentelemetry import trace`, em `core/telemetry.py` de cada serviço); o SDK e o exporter
+  continuam sendo configurados pelo `opentelemetry-instrument`, nunca no código. Spans manuais:
+  `order.pay` (Order Service) e `payment.fraud_check` (Payment Service); herdam o contexto do
+  span automático da requisição, então ficam no mesmo trace.
 - **OpenTelemetry por instrumentação automática.** O Uvicorn roda sob `opentelemetry-instrument`
-  (o Alembic não), configurado só por variáveis `OTEL_*`, sem mudanças no código da aplicação.
+  (o Alembic não), configurado só por variáveis `OTEL_*`.
   FastAPI, HTTPX e SQLAlchemy geram os spans e o HTTPX propaga o `traceparent` (W3C), então o
   pagamento vira um único trace entre os dois serviços. Os health checks são excluídos e a
   instrumentação do psycopg é desligada para não duplicar os spans do SQLAlchemy. Os logs também

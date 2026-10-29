@@ -24,6 +24,7 @@ from app.core.exceptions import (
     NotFoundError,
     PaymentServiceError,
 )
+from app.core.telemetry import tracer, value_band
 from app.models import Order, OrderItem
 from app.models.enums import OrderStatus, PaymentMethod
 from app.repositories.customer_repository import CustomerRepository
@@ -106,31 +107,38 @@ class OrderService:
     async def pay(
         self, order_id: uuid.UUID, card_number: str | None = None
     ) -> tuple[Order, PaymentResult | None]:
-        async with self.session.begin():
-            order = await self._get_for_update(order_id)
-            if order.status == OrderStatus.CANCELLED:
-                raise ConflictError("Cancelled orders cannot be paid")
-            if order.status == OrderStatus.PAID:
-                raise ConflictError("Order is already paid")
-            if order.status == OrderStatus.PAYMENT_FAILED:
-                raise ConflictError("Payment for this order was declined; create a new order")
-            reconciling = order.status == OrderStatus.PAYMENT_PROCESSING
-            order.status = OrderStatus.PAYMENT_PROCESSING
+        with tracer.start_as_current_span("order.pay") as span:
+            span.set_attribute("order.id", str(order_id))
+            async with self.session.begin():
+                order = await self._get_for_update(order_id)
+                span.set_attribute("order.amount", float(order.total_amount))
+                span.set_attribute("order.value_band", value_band(order.total_amount))
+                if order.status == OrderStatus.CANCELLED:
+                    raise ConflictError("Cancelled orders cannot be paid")
+                if order.status == OrderStatus.PAID:
+                    raise ConflictError("Order is already paid")
+                if order.status == OrderStatus.PAYMENT_FAILED:
+                    raise ConflictError("Payment for this order was declined; create a new order")
+                reconciling = order.status == OrderStatus.PAYMENT_PROCESSING
+                order.status = OrderStatus.PAYMENT_PROCESSING
 
-        try:
-            payment = await self._request_payment(order, reconciling, card_number)
-        except PaymentServiceError as exc:
-            logger.warning(
-                "Payment outcome unknown for order_id=%s; order kept in PAYMENT_PROCESSING: %s",
-                order_id,
-                exc.message,
-            )
-            raise type(exc)(
-                f"{exc.message}. The payment outcome is unknown and order {order_id} remains in "
-                f"PAYMENT_PROCESSING. Retry POST /orders/{order_id}/pay to reconcile."
-            ) from exc
+            try:
+                payment = await self._request_payment(order, reconciling, card_number)
+            except PaymentServiceError as exc:
+                # Timeout/502: the payment outcome is unknown, not a decline.
+                span.set_attribute("payment.outcome", "timeout")
+                logger.warning(
+                    "Payment outcome unknown for order_id=%s; order kept in PAYMENT_PROCESSING: %s",
+                    order_id,
+                    exc.message,
+                )
+                raise type(exc)(
+                    f"{exc.message}. The payment outcome is unknown and order {order_id} remains in "
+                    f"PAYMENT_PROCESSING. Retry POST /orders/{order_id}/pay to reconcile."
+                ) from exc
 
-        return await self._apply_payment_result(order_id, payment), payment
+            span.set_attribute("payment.outcome", payment.status.value.lower())
+            return await self._apply_payment_result(order_id, payment), payment
 
     async def cancel(self, order_id: uuid.UUID) -> Order:
         async with self.session.begin():

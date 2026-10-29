@@ -14,13 +14,3 @@ class NotFoundError(AppError):
 
 class ConflictError(AppError):
     status_code = 409
-
-
-class SimulatedDatabaseError(AppError):
-    """Injected intermittent database failure (DATABASE_FAILURE_*)."""
-
-    status_code = 503
-
-
-class SimulatedUnexpectedError(RuntimeError):
-    """Injected internal error (UNEXPECTED_ERROR_*). Deliberately not an AppError: it becomes a 500."""
