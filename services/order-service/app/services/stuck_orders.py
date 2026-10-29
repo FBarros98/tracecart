@@ -1,4 +1,4 @@
-"""Background sampler that feeds the `orders.stuck` gauge (see core/telemetry.py)."""
+"""Background sampler that feeds the `tracecart.orders.awaiting_payment_result` gauge (see core/telemetry.py)."""
 
 import asyncio
 import logging

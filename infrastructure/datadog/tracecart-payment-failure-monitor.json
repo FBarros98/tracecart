@@ -1,0 +1,24 @@
+{
+  "name": "[TraceCart] Pagamentos não concluídos acima do normal",
+  "type": "query alert",
+  "query": "sum(last_5m):(sum:tracecart.payments.attempts{outcome:timeout}.as_count() + sum:tracecart.payments.attempts{outcome:declined}.as_count()) / sum:tracecart.payments.attempts{*}.as_count() > 0.1",
+  "message": "{{#is_alert}}\n🚨 **{{value}}** dos pagamentos dos últimos 5 min terminaram em `declined` ou `timeout` (linha de base: perto de zero).\n\n**Por onde começar**\n1. Dashboard *TraceCart - Saúde da Aplicação*: receita, pedidos criados, pagamentos por resultado e pedidos presos.\n2. Quebre `tracecart.payments.attempts` e `tracecart.orders.awaiting_payment_result` pelas dimensões disponíveis (`outcome`, `value_band`) para ver se a degradação é geral ou localizada.\n3. Nos traces, filtre os `order.pay` com `payment.outcome` diferente de `approved` e compare as durações dos spans filhos.\n4. Correlacione com os logs pelo `trace_id`.\n{{/is_alert}}\n\n{{#is_warning}}\n⚠️ {{value}} dos pagamentos dos últimos 5 min não foram aprovados. Possível início de degradação.\n{{/is_warning}}\n\n{{#is_recovery}}\n✅ Proporção de pagamentos não concluídos voltou ao normal.\n{{/is_recovery}}",
+  "tags": [
+    "service:tracecart",
+    "team:sre"
+  ],
+  "priority": 2,
+  "options": {
+    "thresholds": {
+      "critical": 20,
+      "warning": 10
+    },
+    "notify_audit": false,
+    "notify_no_data": false,
+    "require_full_window": false,
+    "renotify_interval": 0,
+    "include_tags": true,
+    "evaluation_delay": 60,
+    "on_missing_data": "default"
+  }
+}

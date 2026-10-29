@@ -14,15 +14,15 @@ meter = metrics.get_meter("tracecart.order-service")
 # Business metrics. `value_band` (low|mid|high) is the dimension that localizes a degradation;
 # `outcome` is approved|declined|timeout (timeout = payment outcome unknown, not a decline).
 orders_created = meter.create_counter(
-    "orders.created", unit="{order}", description="Orders created, by value band."
+    "tracecart.orders.created", unit="{order}", description="Orders created, by value band."
 )
 orders_payments = meter.create_counter(
-    "orders.payments",
+    "tracecart.payments.attempts",
     unit="{payment}",
     description="Payment attempts finished from the Order Service point of view, by value band and outcome.",
 )
 orders_revenue = meter.create_counter(
-    "orders.revenue", unit="BRL", description="Amount of orders whose payment was approved, by value band."
+    "tracecart.payments.approved_amount", unit="BRL", description="Amount of orders whose payment was approved, by value band."
 )
 
 MID_VALUE_THRESHOLD = Decimal("300.00")
@@ -38,7 +38,7 @@ def value_band(amount: Decimal) -> str:
     return "low"
 
 
-# `orders.stuck`: orders in PAYMENT_PROCESSING for longer than STUCK_AFTER_SECONDS (outcome still
+# `tracecart.orders.awaiting_payment_result`: orders in PAYMENT_PROCESSING for longer than STUCK_AFTER_SECONDS (outcome still
 # unknown, waiting for reconciliation). The gauge callback runs on the SDK's metric reader thread
 # and must not touch the event loop, so a background task (services/stuck_orders.py) samples the
 # database and stores the counts here.
@@ -61,7 +61,7 @@ def _observe_stuck_orders(options: CallbackOptions) -> Iterable[Observation]:
 
 
 meter.create_observable_gauge(
-    "orders.stuck",
+    "tracecart.orders.awaiting_payment_result",
     callbacks=[_observe_stuck_orders],
     unit="{order}",
     description=f"Orders in PAYMENT_PROCESSING for more than {STUCK_AFTER_SECONDS}s, by value band.",

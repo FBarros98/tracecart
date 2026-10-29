@@ -86,6 +86,7 @@ script de init do Postgres só roda com o volume vazio.
 | Ambiente / logs | `ENVIRONMENT`, `LOG_LEVEL` (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
 | Banco | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `ORDER_DB_USER`, `ORDER_DB_PASSWORD`, `PAYMENT_DB_USER`, `PAYMENT_DB_PASSWORD` |
 | Portas no host | `ORDER_SERVICE_PORT` (8000), `PAYMENT_SERVICE_PORT` (8001) |
+| Falha injetável | `FRAUD_CHECK_DELAY_ENABLED` (false), `FRAUD_CHECK_DELAY_SECONDS` (8): quando ligada, a verificação antifraude (span `payment.fraud_check`) espera esse tempo só para pagamentos de risco `high` (valor ≥ R$ 1.000). Acima de `PAYMENT_SERVICE_TIMEOUT_SECONDS`, o Order Service estoura o timeout e o pedido fica em `PAYMENT_PROCESSING`, enquanto o Payment Service conclui o pagamento |
 | Comunicação | `PAYMENT_SERVICE_URL` (`http://tracecart-payment-service:8000`), `PAYMENT_SERVICE_TIMEOUT_SECONDS` (5) |
 | OpenTelemetry | `OTEL_SDK_DISABLED` (false), `OTEL_TRACES_EXPORTER` (otlp), `OTEL_METRICS_EXPORTER` (otlp), `OTEL_LOGS_EXPORTER` (otlp), `OTEL_EXPORTER_OTLP_ENDPOINT` (`http://tracecart-otel-collector:4317`), `OTEL_EXPORTER_OTLP_PROTOCOL` (grpc), `ORDER_SERVICE_VERSION` / `PAYMENT_SERVICE_VERSION` (1.0.0, viram `service.version`). Lidas pelo SDK do OTel, não pelo `pydantic-settings`; as demais `OTEL_*` (nome do serviço, amostragem, exclusões) são fixas no `compose.yaml` |
 | Cribl self-hosted | `CRIBL_VERSION` (`4.20.4`, tag da imagem `cribl/cribl`; sempre fixa), `CRIBL_UI_PORT` (`9000`, porta da UI no host), `CRIBL_OTLP_ENDPOINT` (`tracecart-cribl:4317`, Source OpenTelemetry com OTLP version 1.3.1, protocolo gRPC, sem TLS), `CRIBL_AUTH_TOKEN` (opcional; token do Source, enviado como `authorization: Bearer <token>`) |
@@ -164,6 +165,17 @@ Cada *request* é uma jornada de compra com várias chamadas: `GET /products` �
 `GET /orders/{id}`. Se o resultado do pagamento ficar desconhecido (502/504), a jornada tenta
 reconciliar uma vez. No fim, o script mostra um resumo com contagem por status HTTP, latências
 média/p95/máx por operação e o status final dos pedidos. Requer o seed (usa os clientes existentes).
+
+Para manter uma linha de base no backend de observabilidade, use o modo contínuo:
+
+```bash
+python scripts/load_generator.py --continuous                      # 5 workers, ~2s entre jornadas
+python scripts/load_generator.py --continuous --concurrency 3 --interval 3
+```
+
+Roda até `Ctrl+C` (o resumo sai ao parar). Como o estoque é finito, a cada 60 s o gerador cria uma
+nova versão (`<nome> #2`, `#3`, ...) de qualquer produto cujo estoque somado caiu abaixo de 30,
+com o mesmo preço e categoria; o catálogo cresce com o tempo e `GET /products` é paginado.
 
 ## Reconciliação de pagamentos
 
@@ -248,7 +260,10 @@ Para consultas pontuais não é preciso: `echo "SELECT 1;" | docker compose exec
 - **OpenTelemetry por instrumentação automática.** O Uvicorn roda sob `opentelemetry-instrument`
   (o Alembic não), configurado só por variáveis `OTEL_*`.
   FastAPI, HTTPX e SQLAlchemy geram os spans e o HTTPX propaga o `traceparent` (W3C), então o
-  pagamento vira um único trace entre os dois serviços. Os health checks são excluídos e a
+  pagamento vira um único trace entre os dois serviços. As métricas são exportadas com
+  temporalidade *delta* (`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE`): cada ponto de um
+  counter é o incremento desde a última exportação, e não o total acumulado, o que faz o `sum` de
+  uma janela de tempo no Datadog dar o valor da janela. Os health checks são excluídos e a
   instrumentação do psycopg é desligada para não duplicar os spans do SQLAlchemy. Os logs também
   são exportados via OTLP sem mudança de código: a instrumentação de logging adiciona um handler ao
   logger raiz e o preserva no `basicConfig(force=True)` de `core/logging.py`. Cada log emitido

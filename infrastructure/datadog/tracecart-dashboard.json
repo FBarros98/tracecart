@@ -1,0 +1,212 @@
+{
+  "title": "TraceCart - Saúde da Aplicação",
+  "description": "Negócio (pedidos/pagamentos), aplicação (APM) e infraestrutura (containers) do TraceCart.",
+  "layout_type": "ordered",
+  "reflow_type": "fixed",
+  "template_variables": [
+    {"name": "env", "prefix": "env", "default": "*"},
+    {"name": "service", "prefix": "service", "default": "*"}
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "type": "group", "title": "Negócio", "layout_type": "ordered", "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "query_value", "title": "Pedidos criados (período)", "autoscale": true, "precision": 0,
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "aggregator": "sum", "query": "sum:tracecart.orders.created{$env,$service}.as_count()"}], "formulas": [{"formula": "q"}], "response_format": "scalar"}]
+            },
+            "layout": {"x": 0, "y": 0, "width": 3, "height": 2}
+          },
+          {
+            "definition": {
+              "type": "query_value", "title": "Receita aprovada (BRL)", "autoscale": true, "precision": 2, "custom_unit": "R$",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "aggregator": "sum", "query": "sum:tracecart.payments.approved_amount{$env,$service}.as_count()"}], "formulas": [{"formula": "q"}], "response_format": "scalar"}]
+            },
+            "layout": {"x": 3, "y": 0, "width": 3, "height": 2}
+          },
+          {
+            "definition": {
+              "type": "query_value", "title": "Taxa de aprovação de pagamentos (%)", "autoscale": false, "precision": 1, "custom_unit": "%",
+              "requests": [{
+                "queries": [
+                  {"data_source": "metrics", "name": "ok", "aggregator": "sum", "query": "sum:tracecart.payments.attempts{$env,$service,outcome:approved}.as_count()"},
+                  {"data_source": "metrics", "name": "all", "aggregator": "sum", "query": "sum:tracecart.payments.attempts{$env,$service}.as_count()"}
+                ],
+                "formulas": [{"formula": "100 * ok / all"}], "response_format": "scalar",
+                "conditional_formats": [
+                  {"comparator": "<", "value": 80, "palette": "white_on_red"},
+                  {"comparator": "<", "value": 95, "palette": "white_on_yellow"},
+                  {"comparator": ">=", "value": 95, "palette": "white_on_green"}
+                ]
+              }]
+            },
+            "layout": {"x": 6, "y": 0, "width": 3, "height": 2}
+          },
+          {
+            "definition": {
+              "type": "query_value", "title": "Pedidos presos em PAYMENT_PROCESSING (>30s)", "autoscale": false, "precision": 0,
+              "requests": [{
+                "queries": [{"data_source": "metrics", "name": "q", "aggregator": "last", "query": "sum:tracecart.orders.awaiting_payment_result{$env,$service}"}],
+                "formulas": [{"formula": "q"}], "response_format": "scalar",
+                "conditional_formats": [
+                  {"comparator": ">", "value": 0, "palette": "white_on_red"},
+                  {"comparator": "<=", "value": 0, "palette": "white_on_green"}
+                ]
+              }]
+            },
+            "layout": {"x": 9, "y": 0, "width": 3, "height": 2}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Pagamentos por resultado (approved / declined / timeout)", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "sum:tracecart.payments.attempts{$env,$service} by {outcome}.as_count()"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "bars"}]
+            },
+            "layout": {"x": 0, "y": 2, "width": 6, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Pedidos criados por faixa de valor", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "sum:tracecart.orders.created{$env,$service} by {value_band}.as_count()"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "bars"}]
+            },
+            "layout": {"x": 6, "y": 2, "width": 6, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Receita aprovada por faixa de valor (BRL)", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "sum:tracecart.payments.approved_amount{$env,$service} by {value_band}.as_count()"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "area"}]
+            },
+            "layout": {"x": 0, "y": 5, "width": 6, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Pedidos presos por faixa de valor (aguardando reconciliação)", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "max:tracecart.orders.awaiting_payment_result{$env,$service} by {value_band}"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "line"}],
+              "markers": [{"value": "y = 0", "display_type": "ok dashed"}]
+            },
+            "layout": {"x": 6, "y": 5, "width": 6, "height": 3}
+          }
+        ]
+      },
+      "layout": {"x": 0, "y": 0, "width": 12, "height": 9}
+    },
+    {
+      "definition": {
+        "type": "group", "title": "Aplicação (APM)", "layout_type": "ordered", "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries", "title": "Requisições por serviço", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "sum:trace.http.server.request.hits{$env,$service} by {service}.as_count()"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "bars"}]
+            },
+            "layout": {"x": 0, "y": 0, "width": 4, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Taxa de erro por serviço (%)", "show_legend": true, "legend_layout": "auto",
+              "requests": [{
+                "queries": [
+                  {"data_source": "metrics", "name": "err", "query": "sum:trace.http.server.request.errors{$env,$service} by {service}.as_count()"},
+                  {"data_source": "metrics", "name": "hits", "query": "sum:trace.http.server.request.hits{$env,$service} by {service}.as_count()"}
+                ],
+                "formulas": [{"formula": "100 * err / hits"}], "response_format": "timeseries", "display_type": "line"
+              }],
+              "yaxis": {"min": "0"}
+            },
+            "layout": {"x": 4, "y": 0, "width": 4, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Latência p95 por serviço", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "p95:trace.http.server.request.duration{$env,$service} by {service}"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "line"}]
+            },
+            "layout": {"x": 8, "y": 0, "width": 4, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "toplist", "title": "Erros por recurso (endpoint)",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "aggregator": "sum", "query": "sum:trace.http.server.request.errors{$env,$service} by {resource_name}.as_count()"}], "formulas": [{"formula": "q", "limit": {"count": 10, "order": "desc"}}], "response_format": "scalar"}]
+            },
+            "layout": {"x": 0, "y": 3, "width": 6, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "toplist", "title": "Recursos mais lentos (p95)",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "aggregator": "avg", "query": "p95:trace.http.server.request.duration{$env,$service} by {resource_name}"}], "formulas": [{"formula": "q", "limit": {"count": 10, "order": "desc"}}], "response_format": "scalar"}]
+            },
+            "layout": {"x": 6, "y": 3, "width": 6, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "log_stream", "title": "Logs de erro/warning", "indexes": [], "query": "$env $service status:(error OR warn)",
+              "columns": [], "show_date_column": true, "show_message_column": true, "message_display": "expanded-md",
+              "sort": {"column": "time", "order": "desc"}
+            },
+            "layout": {"x": 0, "y": 6, "width": 12, "height": 4}
+          }
+        ]
+      },
+      "layout": {"x": 0, "y": 9, "width": 12, "height": 11}
+    },
+    {
+      "definition": {
+        "type": "group", "title": "Infraestrutura (containers)", "layout_type": "ordered", "show_title": true,
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries", "title": "CPU por container (%)", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "avg:container.cpu.utilization{$env,$service} by {container.name}"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "line"}]
+            },
+            "layout": {"x": 0, "y": 0, "width": 4, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Memória em uso por container", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "avg:container.memory.usage.total{$env,$service} by {container.name}"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "line"}]
+            },
+            "layout": {"x": 4, "y": 0, "width": 4, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Rede (bytes recebidos / enviados)", "show_legend": true, "legend_layout": "auto",
+              "requests": [{
+                "queries": [
+                  {"data_source": "metrics", "name": "rx", "query": "avg:container.network.io.usage.rx_bytes{$env,$service} by {container.name}.as_rate()"},
+                  {"data_source": "metrics", "name": "tx", "query": "avg:container.network.io.usage.tx_bytes{$env,$service} by {container.name}.as_rate()"}
+                ],
+                "formulas": [{"formula": "rx"}, {"formula": "tx"}], "response_format": "timeseries", "display_type": "line"
+              }]
+            },
+            "layout": {"x": 8, "y": 0, "width": 4, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "query_table", "title": "Restarts e uptime por container",
+              "requests": [{
+                "queries": [
+                  {"data_source": "metrics", "name": "restarts", "aggregator": "max", "query": "max:container.restarts{$env,$service} by {container.name}"},
+                  {"data_source": "metrics", "name": "uptime", "aggregator": "last", "query": "max:container.uptime{$env,$service} by {container.name}"}
+                ],
+                "formulas": [
+                  {"formula": "restarts", "alias": "Restarts", "conditional_formats": [{"comparator": ">", "value": 0, "palette": "white_on_red"}]},
+                  {"formula": "uptime", "alias": "Uptime (s)"}
+                ],
+                "response_format": "scalar"
+              }]
+            },
+            "layout": {"x": 0, "y": 3, "width": 6, "height": 3}
+          },
+          {
+            "definition": {
+              "type": "timeseries", "title": "Block I/O por container (bytes/s)", "show_legend": true, "legend_layout": "auto",
+              "requests": [{"queries": [{"data_source": "metrics", "name": "q", "query": "avg:container.blockio.io_service_bytes_recursive{$env,$service} by {container.name}.as_rate()"}], "formulas": [{"formula": "q"}], "response_format": "timeseries", "display_type": "line"}]
+            },
+            "layout": {"x": 6, "y": 3, "width": 6, "height": 3}
+          }
+        ]
+      },
+      "layout": {"x": 0, "y": 20, "width": 12, "height": 7}
+    }
+  ]
+}

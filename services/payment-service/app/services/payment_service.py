@@ -12,12 +12,14 @@ A failure before finalize leaves the payment PROCESSING or ERROR, which a retry 
 safely reprocesses.
 """
 
+import asyncio
 import logging
 import time
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.telemetry import risk_level, tracer
 from app.models import Payment
@@ -82,9 +84,19 @@ class PaymentService:
             span.set_attribute("payment.id", str(payment.id))
             span.set_attribute("payment.amount", float(payment.amount))
             span.set_attribute("fraud.risk_level", level)
+            settings = get_settings()
+            slow = settings.fraud_check_delay_enabled and level == "high"
             logger.info(
-                "Fraud check: payment_id=%s order_id=%s risk_level=%s", payment.id, payment.order_id, level
+                "Fraud check: payment_id=%s order_id=%s risk_level=%s delay_seconds=%s",
+                payment.id,
+                payment.order_id,
+                level,
+                settings.fraud_check_delay_seconds if slow else 0,
             )
+            if slow:
+                span.set_attribute("fraud.delay_seconds", settings.fraud_check_delay_seconds)
+                # No transaction is open here (see _register/_finalize), so the delay holds no DB connection.
+                await asyncio.sleep(settings.fraud_check_delay_seconds)
 
     async def _register(self, data: PaymentCreate) -> tuple[Payment, bool]:
         async with self.session.begin():

@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=5, ge=0)
     db_connect_timeout_seconds: int = Field(default=5, ge=1)
 
+    # Failure scenario: slow fraud check for high-risk payments (off by default). The delay should be
+    # longer than the Order Service's PAYMENT_SERVICE_TIMEOUT_SECONDS so those orders end up unknown.
+    fraud_check_delay_enabled: bool = False
+    fraud_check_delay_seconds: float = Field(default=8.0, gt=0)
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalize_log_level(cls, value: object) -> object:

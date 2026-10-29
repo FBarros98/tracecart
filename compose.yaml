@@ -25,6 +25,10 @@ x-otel-environment: &otel-environment
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tracecart-otel-collector:4317}
   OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
   OTEL_TRACES_SAMPLER: parentbased_always_on
+  # Counters and histograms are exported as the change since the last export (delta), not as a
+  # running total (cumulative, the SDK default). Summing cumulative points over a time window
+  # (e.g. "sum of tracecart.payments.approved_amount in the last 15m" in Datadog) adds the running totals together.
+  OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE: delta
   # Health checks run every 10s; tracing them would only add noise.
   OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: "health/.*"
   # SQLAlchemy instrumentation already traces every query; psycopg would duplicate the spans.
@@ -125,6 +129,8 @@ services:
       DB_NAME: tracecart_payments
       DB_USER: ${PAYMENT_DB_USER:-tracecart_payment}
       DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?Set PAYMENT_DB_PASSWORD in .env}
+      FRAUD_CHECK_DELAY_ENABLED: ${FRAUD_CHECK_DELAY_ENABLED:-false}
+      FRAUD_CHECK_DELAY_SECONDS: ${FRAUD_CHECK_DELAY_SECONDS:-8}
     ports:
       - "${PAYMENT_SERVICE_PORT:-8001}:8000"
     depends_on:

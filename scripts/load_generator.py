@@ -9,11 +9,17 @@ exercise reconciliation.
 Usage:
     python scripts/load_generator.py --requests 1000 --concurrency 10 [--interval 0.0]
         [--base-url http://localhost:8000] [--cancel-rate 0.1]
+    python scripts/load_generator.py --continuous [--concurrency 3] [--interval 2.0]
+
+--continuous keeps generating journeys until Ctrl+C (a steady baseline for the observability
+backend). Stock is finite, so every RESTOCK_INTERVAL_SECONDS the generator creates a new version
+("<name> #2", "#3", ...) of any product whose total stock is running out, keeping price and category.
 """
 
 import argparse
 import asyncio
 import random
+import re
 import statistics
 import sys
 import time
@@ -25,6 +31,12 @@ PAYMENT_METHODS = ("PIX", "CREDIT_CARD", "BOLETO")
 # Public test card numbers (valid Luhn), never real cards.
 TEST_CARD_NUMBERS = ("4111111111111111", "5555555555554444", "4242424242424242")
 OUTCOME_UNKNOWN_CODES = {202, 502, 504}
+
+PRODUCTS_PAGE_SIZE = 100  # maximum accepted by GET /products
+RESTOCK_INTERVAL_SECONDS = 60
+RESTOCK_THRESHOLD = 30  # restock a product when the sum of its versions' stock falls below this
+RESTOCK_QUANTITY = 300
+PRODUCT_NAME = re.compile(r"^(?P<base>.*?)(?: #(?P<version>\d+))?$")
 
 
 class Stats:
@@ -51,12 +63,50 @@ async def call(
     return response
 
 
+async def list_products(client: httpx.AsyncClient, stats: Stats) -> list[dict] | None:
+    """All active products (paginated: restocking makes the catalog grow past one page)."""
+    products: list[dict] = []
+    while True:
+        response = await call(
+            client, stats, "list_products", "GET", "/products",
+            params={"active_only": "true", "limit": PRODUCTS_PAGE_SIZE, "offset": len(products)},
+        )
+        if response is None or response.status_code != 200:
+            return None
+        page = response.json()
+        products.extend(page)
+        if len(page) < PRODUCTS_PAGE_SIZE:
+            return products
+
+
+async def restock(client: httpx.AsyncClient, stats: Stats) -> None:
+    products = await list_products(client, stats)
+    if products is None:
+        return
+    versions: defaultdict[str, list[dict]] = defaultdict(list)
+    for product in products:
+        versions[PRODUCT_NAME.match(product["name"])["base"]].append(product)
+    for base, group in versions.items():
+        if sum(p["stock_quantity"] for p in group) >= RESTOCK_THRESHOLD:
+            continue
+        latest = max(int(PRODUCT_NAME.match(p["name"])["version"] or 1) for p in group)
+        payload = {
+            "name": f"{base} #{latest + 1}",
+            "category": group[0]["category"],
+            "price": group[0]["price"],
+            "stock_quantity": RESTOCK_QUANTITY,
+        }
+        response = await call(client, stats, "restock_product", "POST", "/products", json=payload)
+        if response is not None and response.status_code == 201:
+            print(f"  restocked: {payload['name']} (stock={RESTOCK_QUANTITY})")
+
+
 async def journey(client: httpx.AsyncClient, stats: Stats, customers: list[str], cancel_rate: float) -> None:
-    response = await call(client, stats, "list_products", "GET", "/products", params={"active_only": "true"})
-    if response is None or response.status_code != 200:
+    products = await list_products(client, stats)
+    if products is None:
         stats.outcomes["products_unavailable"] += 1
         return
-    available = [p for p in response.json() if p["stock_quantity"] > 0]
+    available = [p for p in products if p["stock_quantity"] > 0]
     if not available:
         stats.outcomes["no_stock_available"] += 1
         return
@@ -126,6 +176,41 @@ def print_summary(stats: Stats, journeys: int, elapsed: float) -> None:
         print(f"  {outcome:<30}{count:>7}")
 
 
+async def run_continuous(
+    client: httpx.AsyncClient, stats: Stats, customers: list[str], args: argparse.Namespace
+) -> int:
+    journeys = 0
+
+    async def worker() -> None:
+        nonlocal journeys
+        while True:
+            try:
+                await journey(client, stats, customers, args.cancel_rate)
+            except Exception as exc:  # keep the baseline running whatever happens to one journey
+                stats.outcomes[f"journey_error_{type(exc).__name__}"] += 1
+            journeys += 1
+            await asyncio.sleep(args.interval * random.uniform(0.5, 1.5))
+
+    async def maintenance() -> None:
+        while True:
+            await restock(client, stats)
+            print(f"  [{time.strftime('%H:%M:%S')}] journeys={journeys} http_calls={sum(stats.calls.values())}")
+            await asyncio.sleep(RESTOCK_INTERVAL_SECONDS)
+
+    print(f"Running continuously against {args.base_url} "
+          f"(concurrency={args.concurrency}, interval~{args.interval}s). Ctrl+C to stop.")
+    started = time.perf_counter()
+    tasks = [asyncio.create_task(worker()) for _ in range(args.concurrency)]
+    tasks.append(asyncio.create_task(maintenance()))
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        print_summary(stats, journeys, max(time.perf_counter() - started, 0.001))
+    return 0
+
+
 async def run(args: argparse.Namespace) -> int:
     stats = Stats()
     timeout = httpx.Timeout(30.0)
@@ -141,6 +226,9 @@ async def run(args: argparse.Namespace) -> int:
         if not customers:
             print("No customers found. Run `python scripts/seed.py` first.", file=sys.stderr)
             return 1
+
+        if args.continuous:
+            return await run_continuous(client, stats, customers, args)
 
         semaphore = asyncio.Semaphore(args.concurrency)
         completed = 0
@@ -170,10 +258,17 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=0.0, help="pause (s) after each journey per worker")
     parser.add_argument("--base-url", default="http://localhost:8000", help="Order Service base URL")
     parser.add_argument("--cancel-rate", type=float, default=0.1, help="share of orders cancelled instead of paid")
+    parser.add_argument("--continuous", action="store_true",
+                        help="run until Ctrl+C, ignoring --requests (interval defaults to 2s)")
     args = parser.parse_args()
     if args.requests < 1 or args.concurrency < 1 or args.interval < 0 or not 0 <= args.cancel_rate <= 1:
         parser.error("--requests/--concurrency must be >= 1, --interval >= 0, --cancel-rate in [0, 1]")
-    return asyncio.run(run(args))
+    if args.continuous and args.interval == 0:
+        args.interval = 2.0
+    try:
+        return asyncio.run(run(args))
+    except KeyboardInterrupt:
+        return 0
 
 
 if __name__ == "__main__":
